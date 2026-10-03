@@ -458,6 +458,78 @@ describe('the permission approval sheet', () => {
     expect(said).toEqual([['allow_session', '', undefined]])
   })
 
+  /* The gate grants no session key for a change to Raven's own configuration,
+     so a "for this conversation" answer would promise to stop asking and then
+     ask again. The card shows the change itself, not the tool's arguments. */
+  it('asks about a configuration change once, as the old and new value', () => {
+    const cfg = {
+      ...base, approvalId: 'ap-cfg', command: "raven_config action='set'", kind: 'config.change', family: '',
+      evidence: { action: 'set', setting: 'tools.exec.timeout', was: '60', value: '300', effect: 'next_turn' },
+    }
+    openApproval(cfg, handlers())
+    expect(opts().map((b) => b.textContent)).toEqual([`gui.confirm.deny${ESC_LABEL}`, `gui.confirm.allow${chordLabel()}`])
+    broaderKey()
+    expect(said).toEqual([])
+    expect(document.querySelector('.cp-why')!.textContent).toBe('gui.confirm.why.config_change')
+    expect(document.querySelector('.cp-ev-path')!.textContent).toBe('tools.exec.timeout')
+    expect(document.querySelector('.cp-del')!.textContent).toBe('- 60\n')
+    expect(document.querySelector('.cp-add')!.textContent).toBe('+ 300')
+    expect(document.querySelector('.cp-cfg-note')!.textContent).toBe('gui.confirm.cfg.effect.next_turn')
+    expect(document.querySelector('.cp-cfg-warn')).toBeNull()
+    opts()[1]!.click()
+    expect(said).toEqual([['allow', '', undefined]])
+
+    openApproval(fresh({ ...cfg, evidence: { action: 'set', setting: 'x', was: '60', was_default: true, value: '1' } }), handlers())
+    expect(document.querySelector('.cp-del')!.textContent).toBe('- 60 gui.confirm.cfg.reset\n')
+
+    openApproval(fresh({ ...cfg, evidence: { action: 'restart', target: 'reload' } }), handlers())
+    expect(document.querySelector('.cp-ev')!.textContent).toContain('gui.confirm.cfg.reload')
+    openApproval(fresh({ ...cfg, evidence: { action: 'restart', target: 'restart' } }), handlers())
+    expect(document.querySelector('.cp-ev')!.textContent).toContain('gui.confirm.cfg.restart')
+
+    openApproval(fresh({ ...cfg, evidence: { action: 'unset', setting: 'x', was: '1', sensitive: 'loosens' } }), handlers())
+    expect(document.querySelector('.cp-add')!.textContent).toBe('+ gui.confirm.cfg.reset')
+    expect(document.querySelector('.cp-cfg-warn')!.textContent).toBe('gui.confirm.cfg.sensitive')
+
+    openApproval(fresh({ ...cfg, evidence: { action: 'test', setting: 'subagents.Raven-Research', change: 'Run it' } }), handlers())
+    expect(document.querySelector('.cp-ev')!.textContent).toBe('gui.confirm.cfg.test')
+
+    /* An unset that is a choice says which one, on both sides of the diff. */
+    openApproval(fresh({ ...cfg, evidence: { action: 'unset', setting: 'm', was: 'a/b', unset_to: 'main_model' } }), handlers())
+    expect(document.querySelector('.cp-add')!.textContent).toBe('+ gui.confirm.cfg.unset_to.main_model')
+    openApproval(fresh({ ...cfg, evidence: { action: 'set', setting: 'm', value: 'a/b', was_unset: true, unset_to: 'main_model' } }), handlers())
+    expect(document.querySelector('.cp-del')!.textContent).toBe('- gui.confirm.cfg.unset_to.main_model\n')
+  })
+
+  /* Seen live: asked to switch the search vendor and set its key, the agent
+     changed the vendor, then told the reader to go to Settings for the key.
+     One card now carries both; the key itself is typed on the credential card
+     that follows the allow (features/composer/credential.ts), never here. */
+  it('lays out every change of a batch, and says where each key is entered', async () => {
+    const batch = {
+      ...base, approvalId: 'ap-key', command: "raven_config action='set'", kind: 'config.change', family: '',
+      evidence: {
+        action: 'set',
+        changes: [
+          { action: 'set', setting: 'tools.web.search.provider', was: 'serper', was_default: true, value: 'tavily', effect: 'next_turn' },
+          { action: 'set', setting: 'tools.web.providers.tavily.apiKey', secret: true, was: 'not set', enterable: true },
+          { action: 'set', setting: 'tools.media.speech.apiKey', secret: true, was: 'set' },
+        ],
+      },
+    }
+    openApproval(fresh(batch), handlers())
+    const paths = [...document.querySelectorAll('.csheet .cp-ev-path')].map((el) => el.textContent)
+    expect(paths).toEqual(['tools.web.search.provider', 'tools.web.providers.tavily.apiKey', 'tools.media.speech.apiKey'])
+    expect(document.querySelector('.csheet input')).toBeNull()
+    const text = document.querySelector('.csheet')!.textContent
+    expect(text).toContain('gui.confirm.cfg.key_field')
+    expect(text).toContain('gui.confirm.cfg.key_no_field')
+    expect(text).toContain('gui.confirm.cfg.key_is_set')
+    opts()[1]!.click()
+    await tick()
+    expect(said).toEqual([['allow', '', undefined]])
+  })
+
   /* The one sweep that could still strand a turn. A confirm request arriving on
      the same conversation used to take the gate's pending ask down with it, and
      nothing under that ask retires it but an answer: the call would then wait
@@ -489,6 +561,7 @@ describe('the permission approval sheet', () => {
       { kind: 'mcp.call', evidence: { server: 's', tool: 't', input: 'x'.repeat(40), truncated: true } },
       { kind: 'shell.exec', evidence: { command: 'rm -rf x', cwd: '/w', truncated: true } },
       { kind: 'unknown', evidence: { input: 'y'.repeat(40), truncated: true } },
+      { kind: 'config.change', evidence: { action: 'set', setting: 'a.b', value: 'z'.repeat(40), truncated: true } },
     ]
     for (const c of cases) {
       openApproval(fresh({ ...base, ...c, family: '' }), handlers())

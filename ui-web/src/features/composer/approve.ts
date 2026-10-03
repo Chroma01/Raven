@@ -34,7 +34,7 @@ import { ESC_LABEL, chordLabel, sendChord } from '../../lib/platform'
 import { add as sheetAdd, dropClass, remove as sheetRemove, session } from '../../state/sheetRack'
 import { ds } from '../../state/sources'
 import { AskApproveSheet } from './AskApproveSheet'
-import { GateSheet, LandedSheet } from './GateSheet'
+import { configRows, GateSheet, LandedSheet } from './GateSheet'
 import { composing } from './store'
 
 import type { SheetOptionRow } from '../../chrome/SheetRack'
@@ -163,7 +163,7 @@ export interface ApprovalReq {
      when there is none, and then the sheet offers no such choice. */
   suggestedPattern?: string
   /* The prompt's view, as the engine sent it: the layout (`shell.exec`,
-     `file.write`, `mcp.call`, `unknown`), the shell command family that words
+     `file.write`, `mcp.call`, `config.change`, `unknown`), the shell command family that words
      it, who is asking, and the tool's own account of the call. */
   kind?: string
   family?: string
@@ -252,7 +252,26 @@ function wordsFor(req: ApprovalReq): GateWords {
   }
   const slot = kind === 'shell.exec' ? (req.family || 'shell')
     : kind === 'file.write' ? 'file_write'
-      : kind === 'mcp.call' ? 'mcp_call' : 'unknown'
+      : kind === 'mcp.call' ? 'mcp_call'
+        : kind === 'config.change' ? 'config_change' : 'unknown'
+  const cfg = kind === 'config.change'
+    ? {
+      reset: t('gui.confirm.cfg.reset'),
+      reload: t('gui.confirm.cfg.reload'),
+      restart: t('gui.confirm.cfg.restart'),
+      keyField: t('gui.confirm.cfg.key_field'),
+      keyIsSet: t('gui.confirm.cfg.key_is_set'),
+      keyNoField: t('gui.confirm.cfg.key_no_field'),
+      rows: configRows(ev).map((row) => ({
+        effect: str(row.effect) ? t('gui.confirm.cfg.effect.' + str(row.effect), {}, '') : '',
+        sensitive: str(row.sensitive) ? t('gui.confirm.cfg.sensitive', { note: str(row.sensitive) }) : '',
+        unsetTo: str(row.unset_to) ? t('gui.confirm.cfg.unset_to.' + str(row.unset_to), {}, '') : '',
+        test: str(row.action) === 'test'
+          ? t('gui.confirm.cfg.test', { name: str(row.setting).replace(/^subagents\./, '') })
+          : '',
+      })),
+    }
+    : undefined
   return {
     rule: ruleWords(req.suggestedPattern),
     title: t('gui.confirm.title.' + slot, vars, t('gui.confirm.title.unknown', vars)),
@@ -261,6 +280,7 @@ function wordsFor(req: ApprovalReq): GateWords {
     created: t('gui.confirm.ev.created'),
     nodiff: t('gui.confirm.ev.nodiff'),
     cut: t('gui.confirm.ev.cut'),
+    cfg,
   }
 }
 
@@ -310,14 +330,19 @@ export function openApproval(req: ApprovalReq, handlers: ApprovalHandlers, owner
   }
   openApprovals.set(req.approvalId, withdraw)
 
+  /* A change to Raven's own configuration asks every time (the gate grants no
+     session key for it), so offering to stop asking would promise nothing. */
+  const once = req.kind === 'config.change'
   /* The broader grant: a saved rule when the runtime suggested one, the
      conversation otherwise. One of the two, and Shift+Cmd+Enter is it. */
-  const broader = req.suggestedPattern
-    ? () => answer('allow_always', req.suggestedPattern)
-    : () => answer('allow_session')
+  const broader = once
+    ? null
+    : req.suggestedPattern
+      ? () => answer('allow_always', req.suggestedPattern)
+      : () => answer('allow_session')
   const opts: SheetOptionRow[] = [
     { label: t('gui.confirm.deny'), run: () => answer('deny'), go: true, keys: ESC_LABEL },
-    ...(req.suggestedPattern
+    ...(!broader ? [] : req.suggestedPattern
       ? [{
         label: t('gui.confirm.always'),
         run: broader,
@@ -341,8 +366,8 @@ export function openApproval(req: ApprovalReq, handlers: ApprovalHandlers, owner
     const chord = sendChord(e)
     if (!chord) return
     e.preventDefault()
-    if (chord === 'shift') broader()
-    else answer('allow')
+    if (chord !== 'shift') answer('allow')
+    else if (broader) broader()
   }
   document.addEventListener('keydown', onKey, true)
 

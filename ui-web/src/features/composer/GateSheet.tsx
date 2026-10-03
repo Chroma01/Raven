@@ -30,6 +30,73 @@ export interface GateWords {
   readonly created: string
   readonly nodiff: string
   readonly cut: string
+  /* A configuration change's own words, present only for `config.change`. */
+  readonly cfg?: ConfigWords
+}
+
+export interface ConfigWords {
+  readonly reset: string
+  readonly reload: string
+  readonly restart: string
+  /* One per row of `configRows`, in its order. */
+  readonly rows: readonly ConfigRowWords[]
+  /* A key row's note: typed on the credential card once the change is
+     allowed, or, where no card can save it, in Settings. */
+  readonly keyField: string
+  readonly keyIsSet: string
+  readonly keyNoField: string
+}
+
+export interface ConfigRowWords {
+  readonly effect: string
+  readonly sensitive: string
+  readonly unsetTo?: string
+  readonly test?: string
+}
+
+/* A change to Raven's own configuration as the card lays it out: one row per
+   setting, a batch being several. */
+export const configRows = (evidence: Evidence): Evidence[] =>
+  Array.isArray(evidence.changes) ? (evidence.changes as Evidence[]) : [evidence]
+
+function ConfigRow({ row, words, line }: {
+  row: Evidence; words: ConfigWords; line?: ConfigRowWords
+}): JSX.Element {
+  const action = str(row.action)
+  const setting = str(row.setting)
+  if (action === 'restart') return <div>{str(row.target) === 'restart' ? words.restart : words.reload}</div>
+  if (action === 'test') return <div>{line?.test || str(row.change)}</div>
+  /* No field here: the value is typed on a card of its own once this change
+     is allowed (features/composer/credential.ts), so this card only says so. */
+  if (row.secret === true) {
+    return (
+      <div className="cp-ev">
+        <div className="cp-ev-path">{setting}</div>
+        <div className="cp-cfg-note">{row.enterable === true ? words.keyField : words.keyNoField}</div>
+        {str(row.was) === 'set' ? <div className="cp-cfg-note">{words.keyIsSet}</div> : null}
+      </div>
+    )
+  }
+  /* Old and new value as the two sides of a diff, so the reader answers
+     about the change rather than about the arguments that spell it. */
+  /* A setting whose unset is a choice ("follows the main model", "off") says
+     that, rather than "(default)", on whichever side of the diff is unset. */
+  const unsetTo = line?.unsetTo || ''
+  const was = row.was_unset === true && unsetTo
+    ? unsetTo
+    : str(row.was) + (row.was_default === true ? ' ' + words.reset : '')
+  const now = action === 'unset' ? unsetTo || words.reset : str(row.value)
+  return (
+    <div className="cp-ev">
+      {setting ? <div className="cp-ev-path">{setting}</div> : null}
+      <pre className="cp-diff">
+        {was ? <span className="cp-del">{'- ' + was + '\n'}</span> : null}
+        <span className="cp-add">{'+ ' + now}</span>
+      </pre>
+      {line?.effect ? <div className="cp-cfg-note">{line.effect}</div> : null}
+      {line?.sensitive ? <div className="cp-cfg-warn">{line.sensitive}</div> : null}
+    </div>
+  )
 }
 
 export interface GateProps {
@@ -84,6 +151,18 @@ function EvidenceBlock(
       <div className="what cp-ev">
         <div className="cp-ev-path">{str(evidence.server)}.{str(evidence.tool)}</div>
         <pre className="cp-json">{JSON.stringify(evidence.input ?? {}, null, 2)}</pre>
+      </div>
+      {cut}
+    </>
+    )
+  }
+  if (kind === 'config.change' && words.cfg) {
+    const cfg = words.cfg
+    const rows = configRows(evidence)
+    return (
+    <>
+      <div className="what cp-ev">
+        {rows.map((row, i) => <ConfigRow key={i} row={row} words={cfg} line={cfg.rows[i]} />)}
       </div>
       {cut}
     </>

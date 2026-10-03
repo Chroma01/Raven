@@ -615,6 +615,30 @@
       "en": "writing",
       "zh": "正在写入"
     },
+    "gui.act.ing.raven_config_read": {
+      "en": "checking settings",
+      "zh": "正在查看配置"
+    },
+    "gui.act.ing.raven_config_change": {
+      "en": "changing settings",
+      "zh": "正在修改配置"
+    },
+    "gui.act.ing.raven_config_restart": {
+      "en": "reloading Raven",
+      "zh": "正在重载 Raven"
+    },
+    "gui.act.ing.plugin_read": {
+      "en": "checking plugins",
+      "zh": "正在查看插件"
+    },
+    "gui.act.ing.plugin_connect": {
+      "en": "connecting a plugin",
+      "zh": "正在连接插件"
+    },
+    "gui.act.ing.plugin_remove": {
+      "en": "removing a plugin",
+      "zh": "正在移除插件"
+    },
     "gui.act.n.edit_file": {
       "en": "edited {n} files",
       "zh": "修改 {n} 个文件"
@@ -658,6 +682,30 @@
     "gui.act.n.write_file": {
       "en": "wrote {n} files",
       "zh": "写入 {n} 个文件"
+    },
+    "gui.act.n.raven_config_read": {
+      "en": "checked settings {n} times",
+      "zh": "查看配置 {n} 次"
+    },
+    "gui.act.n.raven_config_change": {
+      "en": "changed settings {n} times",
+      "zh": "修改配置 {n} 次"
+    },
+    "gui.act.n.raven_config_restart": {
+      "en": "reloaded Raven {n} times",
+      "zh": "重载 Raven {n} 次"
+    },
+    "gui.act.n.plugin_read": {
+      "en": "checked plugins {n} times",
+      "zh": "查看插件 {n} 次"
+    },
+    "gui.act.n.plugin_connect": {
+      "en": "connected {n} plugins",
+      "zh": "连接插件 {n} 次"
+    },
+    "gui.act.n.plugin_remove": {
+      "en": "removed {n} plugins",
+      "zh": "移除插件 {n} 次"
     },
     "gui.act.v.ask_user": {
       "en": "asked",
@@ -742,6 +790,30 @@
     "gui.act.v.write_file": {
       "en": "wrote",
       "zh": "写入"
+    },
+    "gui.act.v.raven_config_read": {
+      "en": "checked settings",
+      "zh": "查看配置"
+    },
+    "gui.act.v.raven_config_change": {
+      "en": "changed settings",
+      "zh": "修改配置"
+    },
+    "gui.act.v.raven_config_restart": {
+      "en": "reloaded Raven",
+      "zh": "重载 Raven"
+    },
+    "gui.act.v.plugin_read": {
+      "en": "checked plugins",
+      "zh": "查看插件"
+    },
+    "gui.act.v.plugin_connect": {
+      "en": "connected a plugin",
+      "zh": "连接插件"
+    },
+    "gui.act.v.plugin_remove": {
+      "en": "removed a plugin",
+      "zh": "移除插件"
     },
     "gui.add": {
       "en": "Add",
@@ -5143,6 +5215,38 @@
       "en": "Original error",
       "zh": "原始报错"
     },
+    "gui.agent.ask_raven": {
+      "en": "Hand it to Raven →",
+      "zh": "交给 Raven →"
+    },
+    "gui.agent.ask_connect": {
+      "en": "Connect the agent {name} for me. The last try failed: {reason}. Fix what you can yourself, and tell me only when something needs me.",
+      "zh": "帮我把智能体 {name} 接进来。刚才接入失败：{reason}。能自己排查和修的先修好，确实需要我操作的时候再告诉我。"
+    },
+    "gui.agent.ask_test": {
+      "en": "The agent {name} failed its last test: {reason}. Look into it and fix what you can yourself; tell me only when something needs me.",
+      "zh": "智能体 {name} 最近一次测试没通过：{reason}。帮我排查一下，能修的直接修好，确实需要我操作的时候再告诉我。"
+    },
+    "gui.agent.ask_fix": {
+      "en": "A change to the agent {name} did not go through: {reason}. Look into it and fix what you can yourself; tell me only when something needs me.",
+      "zh": "智能体 {name} 刚才的操作没成功：{reason}。帮我排查一下，能修的直接修好，确实需要我操作的时候再告诉我。"
+    },
+    "gui.agent.ask_check": {
+      "en": "The agent {name} is connected, but its check found a problem: {reason}. Look into it and fix what you can yourself; tell me only when something needs me.",
+      "zh": "智能体 {name} 已接入，但检查发现了问题：{reason}。帮我排查一下，能修的直接修好，确实需要我操作的时候再告诉我。"
+    },
+    "gui.agent.warn_title": {
+      "en": "{agent} is connected, but its check found a problem",
+      "zh": "{agent} 连上了，但检查发现了问题"
+    },
+    "gui.agent.warn_lead": {
+      "en": "What the check found is below; once that is fixed, press {button}.",
+      "zh": "检查结果在下面，处理好后点「{button}」。"
+    },
+    "gui.agent.warn_lead_bare": {
+      "en": "What the check found is below.",
+      "zh": "检查结果在下面。"
+    },
     "gui.agent.fix_download": {
       "en": "{agent} could not be downloaded. Its first connect downloads it, so check the network, the npm registry or the proxy, then press {button}. On a slow network, download it first by running this command in a terminal (once it is downloaded it waits for input; press Ctrl-C to leave), then press {button}:",
       "zh": "{agent} 没能下载下来。第一次接入时要联网下载它，请检查网络、npm 源或代理设置，然后点「{button}」。网络慢的话，也可以先在终端运行下面这条命令把它下载好（下载完会停住等待输入，按 Ctrl-C 退出即可），再点「{button}」："
@@ -5978,6 +6082,78 @@
     "gui.confirm.why.unknown": {
       "en": "{who} wants to do this; you have not allowed it yet.",
       "zh": "{who} 要执行这个操作，你还没授权过。"
+    },
+    "gui.confirm.title.config_change": {
+      "en": "Allow {who} to change its own settings?",
+      "zh": "允许 {who} 修改自己的配置吗？"
+    },
+    "gui.confirm.why.config_change": {
+      "en": "{who} wants to change its own configuration. Allowing it covers this change only.",
+      "zh": "{who} 要修改自己的配置。允许只对这一次改动有效。"
+    },
+    "gui.confirm.cfg.reset": {
+      "en": "(default)",
+      "zh": "（默认值）"
+    },
+    "gui.confirm.cfg.unset_to.main_model": {
+      "en": "(follows the main model)",
+      "zh": "（跟随主模型）"
+    },
+    "gui.confirm.cfg.unset_to.off": {
+      "en": "(off)",
+      "zh": "（关闭）"
+    },
+    "gui.confirm.cfg.test": {
+      "en": "Run {name} once to check that it works. It spends that agent's own quota.",
+      "zh": "试运行 {name} 一次，检查它能否工作（会用掉它自己的额度）"
+    },
+    "gui.confirm.cfg.reload": {
+      "en": "Reload Raven so the pending changes take effect. The process stays up; running work finishes first.",
+      "zh": "重新加载 Raven，让待生效的改动生效。进程不中断，正在跑的任务会先跑完。"
+    },
+    "gui.confirm.cfg.restart": {
+      "en": "Restart the whole Raven process so the pending changes take effect. Channels reconnect after a few seconds.",
+      "zh": "重启整个 Raven 进程，让待生效的改动生效。渠道会断开几秒后重连。"
+    },
+    "gui.confirm.cfg.key_field": {
+      "en": "After you allow, a card of its own asks you for this key. It is saved directly and never goes through Raven.",
+      "zh": "允许后会单独弹出一张卡片让你填这个 key，直接保存，不经过 Raven"
+    },
+    "gui.confirm.cfg.key_is_set": {
+      "en": "A key is already set; entering a new one replaces it.",
+      "zh": "已经设置过 key，填新的会替换它"
+    },
+    "gui.confirm.cfg.key_no_field": {
+      "en": "This key cannot be entered here; set it in Settings.",
+      "zh": "这个 key 不能在这里填，请去设置里填写"
+    },
+    "gui.confirm.cfg.sensitive": {
+      "en": "Security: {note}",
+      "zh": "涉及安全：{note}"
+    },
+    "gui.confirm.cfg.effect.next_turn": {
+      "en": "Takes effect from the next message, no restart",
+      "zh": "下一条消息起生效，不用重启"
+    },
+    "gui.confirm.cfg.effect.immediate": {
+      "en": "Takes effect at once",
+      "zh": "立即生效"
+    },
+    "gui.confirm.cfg.effect.reload": {
+      "en": "Takes effect after a reload",
+      "zh": "需要重新加载（reload）后生效"
+    },
+    "gui.confirm.cfg.effect.restart": {
+      "en": "Takes effect after Raven restarts",
+      "zh": "需要重启 Raven 后生效"
+    },
+    "gui.confirm.cfg.effect.memory_server": {
+      "en": "Restarts the memory server to take effect",
+      "zh": "会重启记忆服务使其生效"
+    },
+    "gui.confirm.cfg.effect.inert": {
+      "en": "Nothing reads this setting yet",
+      "zh": "目前没有代码读取这个设置"
     },
     "gui.confirm.ev.created": {
       "en": "new file",
@@ -10186,6 +10362,38 @@
     "gui.pb.stint_status_finished": {
       "en": "finished",
       "zh": "已完成"
+    },
+    "gui.confirm.cred.title": {
+      "en": "Enter a key",
+      "zh": "填写密钥"
+    },
+    "gui.confirm.cred.hint": {
+      "en": "Saved straight into the settings. Raven never sees it.",
+      "zh": "直接保存到设置里，Raven 看不到它"
+    },
+    "gui.confirm.cred.replaces": {
+      "en": "One is already set; what you enter replaces it.",
+      "zh": "已经设置过，填入的新值会替换它"
+    },
+    "gui.confirm.cred.placeholder": {
+      "en": "Paste it here",
+      "zh": "粘贴到这里"
+    },
+    "gui.confirm.cred.save": {
+      "en": "Save",
+      "zh": "保存"
+    },
+    "gui.confirm.cred.skip": {
+      "en": "Skip",
+      "zh": "跳过"
+    },
+    "gui.confirm.cred.saving": {
+      "en": "Saving...",
+      "zh": "正在保存..."
+    },
+    "gui.confirm.cred.unsent": {
+      "en": "It could not be sent; try again.",
+      "zh": "没有发送出去，请再试一次"
     },
     "gui.conn.page": {
       "en": "Channels",
