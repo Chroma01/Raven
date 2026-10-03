@@ -349,8 +349,15 @@ async def test_launch_reports_missing_chromium_with_the_interpreter_command(monk
         await b._ensure()
 
     why = str(exc.value)
-    assert "Chromium is not installed" in why
-    assert f"{shlex.quote(sys.executable)} -m playwright install chromium" in why
+    assert "Chromium is not installed where this process looks for it" in why
+    assert why.endswith(f"{shlex.quote(sys.executable)} -m playwright install chromium"), "the fix closes the line"
+    # The path Playwright searched, quoted back, and the knob that moves the
+    # search: without them the message reads as "not installed" whichever of
+    # the two it was, and a sandboxed HOME sends the reader to download a
+    # browser they already have.
+    assert "(/nowhere/chrome)" in why
+    assert "PLAYWRIGHT_BROWSERS_PATH" in why
+    assert "\n" not in why, "the panel shows this in one block, where a newline collapses to a space"
 
 
 # ── tabs ────────────────────────────────────────────────────────────────
@@ -379,6 +386,11 @@ class _FakePage:
 class _FakeContext:
     def __init__(self, pages: list[Any]) -> None:
         self.pages = pages
+
+    async def new_page(self) -> _FakePage:
+        page = _FakePage("about:blank", f"tab{len(self.pages)}")
+        self.pages.append(page)
+        return page
 
 
 def _with_pages(b: Browser, pages: list[_FakePage], active: int = 0) -> None:
@@ -947,3 +959,100 @@ async def test_an_acting_owner_that_opens_a_tab_still_fronts_it() -> None:
 
     assert b._s.page is page and page is not held
     assert streams == ["restream"], "an act fronts the new tab exactly once"
+
+
+@pytest.mark.parametrize(
+    ("bindings", "lands_on"),
+    [
+        pytest.param({}, "front", id="front-tab-is-the-readers"),
+        pytest.param({"run:other": ("front", 0)}, "new", id="front-tab-held-by-another-owner"),
+        pytest.param({"run:x": ("mine", 0)}, "mine", id="caller-holds-its-own-tab"),
+        pytest.param({"run:x": ("mine", "idle")}, "front", id="caller-idled-out-front-tab-free"),
+        pytest.param(
+            {"run:x": ("mine", "idle"), "run:other": ("front", 0)}, "new", id="caller-idled-out-front-tab-held"
+        ),
+        pytest.param({"run:x": ("mine", "closed")}, "front", id="callers-tab-was-closed"),
+        pytest.param({"run:other": ("front", "idle")}, "front", id="front-tab-held-by-an-idled-out-owner"),
+    ],
+)
+async def test_the_url_reported_for_an_owner_is_where_its_call_lands(
+    bindings: dict[str, tuple[str, Any]], lands_on: str
+) -> None:
+    """The permission gate keys an acting call on ``url_for`` before the call
+    runs, so the site a person approves is the site acted on only if this
+    report and ``_page_for`` pick the same page. One case per branch of that
+    choice; a call that must open a tab of its own is reported empty, since no
+    site describes a page nobody has opened yet."""
+    b = get_browser()
+    pages = {"mine": _FakePage("https://mine.test/"), "front": _FakePage("https://bank.test/")}
+    _driving(b, [pages["mine"], pages["front"]], active=1)
+    b._wire = lambda page: None  # type: ignore[method-assign]
+    for owner, (name, age) in bindings.items():
+        if age == "closed":
+            pages[name]._closed = True
+        seen = time.monotonic() - (driver_module.OWNER_IDLE_S + 1 if age == "idle" else 0)
+        b._s.owners[owner] = _Owner(pages[name], seen)
+    before = set(map(id, pages.values()))
+
+    reported = b.url_for("run:x")
+    landed = await b._page_for("run:x")
+
+    if lands_on == "new":
+        assert id(landed) not in before, "the call opened a tab of its own"
+        assert reported == ""
+    else:
+        assert landed is pages[lands_on]
+        assert reported == landed.url
+
+
+async def test_a_binding_ends_names_the_owner_to_the_listener_however_it_ended() -> None:
+    """A per-owner store outside the driver is told on the same event the driver
+    drops the binding. Four endings, and the set is the driver's own removal
+    sites rather than a list: an explicit release, a reap, the owner's tab
+    closing, and the whole browser closing. An owner that was never bound is
+    not announced -- there is nothing to have lost."""
+    b = get_browser()
+    first, second, third = (_FakePage(f"https://{n}.test/") for n in ("a", "b", "c"))
+    _driving(b, [first, second, third])
+    b._wire = lambda page: None  # type: ignore[method-assign]
+    seen: list[str] = []
+    b.on_owner_released = seen.append
+
+    b.release("never-bound")
+    assert seen == [], "nothing to announce"
+
+    b._s.owners["run:a"] = _Owner(first, time.monotonic())
+    b.release("run:a")
+    assert seen == ["run:a"]
+
+    seen.clear()
+    b._s.owners["run:b"] = _Owner(second, time.monotonic() - driver_module.OWNER_IDLE_S - 1)
+    await b._page_for("run:c", act=False)
+    assert seen == ["run:b"], "a reaped binding is announced, and only it"
+
+    seen.clear()
+    b._s.owners["run:c"] = _Owner(third, time.monotonic())
+    await b.tab_close(2, owner=None)
+    assert seen == ["run:c"], "closing the tab an owner held announces it"
+
+    seen.clear()
+    b._s.owners["run:d"] = _Owner(first, time.monotonic())
+    await b.close()
+    assert seen == ["run:d"], "closing the browser ends the bindings it still held"
+
+
+async def test_a_listener_that_raises_does_not_stop_the_binding_from_ending() -> None:
+    """The listener is a caller's bookkeeping; a bug in it must not leave the
+    driver holding a binding it has decided to drop."""
+    b = get_browser()
+    page = _FakePage("https://a.test/")
+    _driving(b, [page])
+    b._s.owners["run:a"] = _Owner(page, time.monotonic())
+
+    def explode(owner: str) -> None:
+        raise RuntimeError("listener is broken")
+
+    b.on_owner_released = explode
+    b.release("run:a")
+
+    assert "run:a" not in b._s.owners

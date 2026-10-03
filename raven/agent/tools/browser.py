@@ -37,6 +37,13 @@ ACTION_TEXT_CHARS = 3_000
 SNAPSHOT_TEXT_CHARS = 8_000
 MAX_REFS_SHOWN = 120
 
+# How many owners' stamps ``_acted`` keeps, most recent first. The stamps only
+# answer "did the reader touch the page since this owner last acted", which the
+# owners acting lately can answer as well as all of them. The driver prunes an
+# owner when it drops that owner's binding; the cap is for the owners it never
+# drops, so one key per delegated run cannot accumulate for the process's life.
+_ACTED_MAX = 512
+
 # Carried by browser_navigate alone. Every tool's description is paid for on
 # every turn of every conversation, and the one place the model decides whether
 # a page is its business at all is when it opens one.
@@ -50,7 +57,10 @@ HANDOFF_NOTE = (
 # person approves for a click is the site, not the ref id -- so the site the
 # call will land on is written into the parameters before the gate reads them.
 # ``raven.permissions.builtin.session_keys`` keys a browser grant on it, and
-# the approval prompt shows it.
+# the approval prompt shows it. The driver's ``url_for`` predicts that page by
+# the rule ``_page_for`` then binds by. When the call would open a tab of its
+# own, no site describes it yet and none is written: the grant is keyed on the
+# call itself, which no later call to a real site can present.
 
 
 def _browser():
@@ -175,7 +185,10 @@ class _BrowserTool(Tool):
     timeout_seconds = 90.0
 
     # The last time this owner acted, so a readback can say whether a hand
-    # other than the model's touched the browser in between.
+    # other than the model's touched the browser in between. Bounded, and
+    # pruned when the driver drops the matching tab binding: the key is a
+    # delegated run's uid, and a run that has ended never acts again, so an
+    # unbounded map grows one entry per run for the life of the process.
     _acted: dict[str, float] = {}
 
     @staticmethod
@@ -188,11 +201,35 @@ class _BrowserTool(Tool):
         return current_owner()
 
     def _mark(self, owner: str) -> None:
-        _BrowserTool._acted[owner] = time.monotonic()
+        acted = _BrowserTool._acted
+        # Re-inserted rather than updated, so the dict's own order is the order
+        # owners last acted in and the cap can evict from the front: no sort,
+        # and no tie to break between two stamps one clock tick apart.
+        acted.pop(owner, None)
+        acted[owner] = time.monotonic()
+        self._bind_to_driver()
+        while len(acted) > _ACTED_MAX:
+            acted.pop(next(iter(acted)))
 
     def _touched(self, owner: str) -> bool:
         last = _BrowserTool._acted.get(owner)
         return last is not None and _browser().touched_since(last)
+
+    @classmethod
+    def _forget_owner(cls, owner: str) -> None:
+        cls._acted.pop(owner, None)
+
+    def _bind_to_driver(self) -> None:
+        """Have the driver tell the stamp map when it drops an owner's binding.
+
+        Called from ``_mark``, the only place that adds a stamp, so no owner
+        can hold one before the driver knows to prune it. Not at import: reaching for
+        the driver is what builds the process-wide browser, and importing this
+        module must not construct one as a side effect. The driver is the one
+        place that knows when an owner's binding ends, so the map is pruned on
+        that event rather than on a second clock of its own.
+        """
+        _browser().on_owner_released = _BrowserTool._forget_owner
 
     async def _readback(self, owner: str, state: dict[str, Any], *, acted: bool) -> ToolResult:
         """State plus a compact snapshot; the snapshot is skipped on an error
@@ -550,7 +587,8 @@ class BrowserTabsTool(_BrowserTool):
         return (
             "List, open, switch or close tabs of the shared browser. Your calls always land on your own "
             "tab; a tab marked held is another agent's and cannot be taken. new opens a fresh tab (with "
-            "an optional url) and makes it yours; activate makes an unheld tab yours."
+            "an optional url) and makes it yours; activate makes an unheld tab yours. close takes only a "
+            "tab you hold: a tab with no mark at all is the user's, and closing it needs activate first."
         )
 
     @property
