@@ -527,10 +527,14 @@ def render_config(source: Path) -> Path:
     else:
         taken = render.inherit_llm(config, host)
         if not taken:
+            # A home tree copied out by a newer wheel also serves an older checkout, so this
+            # can run on a raven that predates inherit_refusal; that one refuses without the reason.
+            explain = getattr(render, "inherit_refusal", None)
+            reason = f" ({explain(config, host)})" if explain else ""
             raise SystemExit(
-                f"error: {llm_key} is not set and the host config has no provider key to "
-                f"inherit from; put the key in {HERE / '.env'} (see .env.example), export "
-                f"it, or configure a provider in the host raven"
+                f"error: {llm_key} is not set and the host's model cannot be inherited{reason}; "
+                f"put the key in {HERE / '.env'} (see .env.example), export it, or configure a "
+                f"provider in the host raven"
             )
         ignored = [name for name in ("PPT_MODEL", "PPT_API_BASE") if env_value(name)]
         log(
@@ -589,10 +593,10 @@ def render_config(source: Path) -> Path:
 
     # The pooled loop reads identity, sessions, transcripts and the skill pool
     # from ONE agent home; unpinned it would be the host's own (the launcher
-    # inherits RAVEN_HOME), which this agent must not share -- and it must sit
-    # OUTSIDE the host Agent home, which the host hands over as the session
-    # cwd (the runtime refuses a cwd that contains the engine's home). The
-    # shared placement helper seats it in the raven data directory;
+    # normally shares the host's home), which this agent must not share -- and
+    # it must sit OUTSIDE the host Agent home, which the host hands over as the
+    # session cwd (the runtime refuses a cwd that contains the engine's home).
+    # The shared placement helper seats it in the raven data directory;
     # PPT_ACP_HOME overrides. The state root keeps the work (rendered
     # configs, sweep) exactly as before. setdefault, so an operator's
     # explicit workspace wins.
