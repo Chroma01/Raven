@@ -44,6 +44,12 @@ import pytest
 INSTALL_SH = Path(__file__).resolve().parents[1] / "install.sh"
 INSTALL_PS1 = Path(__file__).resolve().parents[1] / "install.ps1"
 
+# Tests that run install.sh code under sh. Git Bash can run them on Windows, but
+# not as a Linux or Mac host would: its curl sits outside /usr/bin and the
+# script's paths mix separators with Windows ones, so a harness there fails or
+# passes for the wrong reason.
+POSIX_SH_ONLY = pytest.mark.skipif(sys.platform == "win32" or shutil.which("sh") is None, reason="POSIX sh only")
+
 
 def test_the_installer_is_where_this_tripwire_thinks_it_is() -> None:
     assert INSTALL_SH.is_file()
@@ -124,7 +130,7 @@ def test_the_launch_probes_before_calling_a_subcommand_the_release_may_lack() ->
     assert "Raven installed." in launch
 
 
-@pytest.mark.skipif(sys.platform == "win32" or shutil.which("sh") is None, reason="POSIX sh only")
+@POSIX_SH_ONLY
 def test_launch_web_answers_each_release_shape_it_exists_for(tmp_path: Path) -> None:
     """The text pins cannot tell a probe that gates the launch from one that is
     merely present. Two fake ravens stand in: the shape of the latest release,
@@ -256,7 +262,7 @@ def test_the_staleness_walk_prunes_what_the_build_itself_writes() -> None:
     assert r"\( -name node_modules -o -name dist -o -name .modern \) -prune -o" in walk
 
 
-@pytest.mark.skipif(sys.platform == "win32" or shutil.which("sh") is None, reason="POSIX sh only")
+@POSIX_SH_ONLY
 def test_is_stale_answers_each_case_it_exists_for(tmp_path: Path) -> None:
     """The text pins above cannot tell a working mtime comparison from a broken
     one, and this is the half that decides whether a rebuild happens at all."""
@@ -335,7 +341,7 @@ def test_the_build_time_node_fetch_cannot_fail_the_install() -> None:
     assert 'blocker="Found node but not npm"' in probe
 
 
-@pytest.mark.skipif(sys.platform == "win32" or shutil.which("sh") is None, reason="POSIX sh only")
+@POSIX_SH_ONLY
 def test_resolve_node_dir_answers_each_case_it_exists_for(tmp_path: Path) -> None:
     """The text pins cannot tell a working fallback from one that never fires."""
     source = INSTALL_SH.read_text(encoding="utf-8")
@@ -498,7 +504,7 @@ def _run_node_step(tmp_path: Path, dist: Path, listing: str | None, *, hidden: t
     return result, runtime, staging
 
 
-@pytest.mark.skipif(sys.platform == "win32" or shutil.which("sh") is None, reason="POSIX sh only")
+@POSIX_SH_ONLY
 def test_a_node_download_that_matches_its_published_digest_is_installed(tmp_path: Path) -> None:
     dist, digest = _node_release(tmp_path)
     result, runtime, staging = _run_node_step(tmp_path, dist, _OTHER_ENTRIES + f"{digest}  {_NODE_PKG}.tar.gz\n")
@@ -509,7 +515,7 @@ def test_a_node_download_that_matches_its_published_digest_is_installed(tmp_path
     assert list(staging.iterdir()) == [], "the download is not left behind"
 
 
-@pytest.mark.skipif(sys.platform == "win32" or shutil.which("sh") is None, reason="POSIX sh only")
+@POSIX_SH_ONLY
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
@@ -698,6 +704,19 @@ def test_the_capability_steps_stay_above_the_closing_launch() -> None:
     assert "libreoffice" not in closing
 
 
+def _installer_job() -> str:
+    """The installer job's text in ci.yml, up to the job after it."""
+    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = workflow[workflow.index("  installer:") :]
+    return job[: job.index("\n  windows-upgrade:")]
+
+
+def _step_value(step: str, pattern: str) -> str:
+    found = re.search(pattern, step)
+    assert found, f"{pattern!r} matches nothing in the step {step.splitlines()[0]!r}"
+    return found.group(1)
+
+
 def test_the_ci_gate_installs_the_latest_release_the_way_users_do() -> None:
     """The text pins above cannot catch the class of defect that shipped: a
     script on main calling something the latest release lacks. Only a real
@@ -705,17 +724,50 @@ def test_the_ci_gate_installs_the_latest_release_the_way_users_do() -> None:
     `curl | sh` and `irm | iex` arrive, which is what selects remote mode; run
     as a file, the script would detect the checkout and install it editable
     instead, and the gate would be measuring the wrong thing."""
-    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    job = workflow[workflow.index("  installer:") :]
-    job = job[: job.index("\n  windows-upgrade:")]
+    job = _installer_job()
     assert "cat install.sh | sh" in job
     assert "Get-Content install.ps1 -Raw | Invoke-Expression" in job
     assert 'RAVEN_NO_LAUNCH: "1"' in job
     assert 'raven.exe" --version' in job and '"$UV_TOOL_BIN_DIR/raven" --version' in job
 
 
+def test_the_ci_gate_runs_the_windows_install_under_both_powershells() -> None:
+    """Windows PowerShell 5.1 is the shell every Windows ships with, pwsh is the
+    one CI reaches for, and their web cmdlets fail differently. A release
+    lookup that only worked the pwsh way passed this gate while every install
+    from the stock shell failed, so the gate runs both -- each into its own
+    tool, bin and home directories. The version check runs the raven.exe in
+    UV_TOOL_BIN_DIR, so a bin directory both installs shared would let one
+    shell's install answer for the other's."""
+    steps = [
+        step
+        for step in _installer_job().split("\n      - ")
+        if "Get-Content install.ps1 -Raw | Invoke-Expression" in step
+    ]
+    assert sorted(_step_value(step, r"\n        shell: (\S+)") for step in steps) == ["powershell", "pwsh"]
+    for name in ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "RAVEN_HOME"):
+        values = {_step_value(step, rf"\n          {name}: (.+)") for step in steps}
+        assert len(values) == 2, f"both PowerShell installs share one {name}"
+
+
 def test_the_windows_installer_is_where_this_tripwire_thinks_it_is() -> None:
     assert INSTALL_PS1.is_file()
+
+
+def test_the_windows_release_lookup_reads_the_redirect_in_both_powershells() -> None:
+    """The lookup stops at the release page redirect and reads its Location.
+    Windows PowerShell 5.1 returns that redirect as the response and reports
+    the exceeded redirect count as an error with no response attached, so the
+    error has to be ignored: raised and caught instead, it left the catch
+    nothing to read, and every install from the stock shell ended in "Could not
+    resolve the latest Raven release wheel". pwsh raises whatever -ErrorAction
+    says, so the catch still reads the exception's response."""
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+    lookup = text[text.index("function Resolve-RavenLatestVersion") : text.index("function Resolve-RavenWheel")]
+    probe = next(line for line in lookup.splitlines() if "-MaximumRedirection 0" in line)
+    assert "-ErrorAction Ignore" in probe
+    assert "$target = [string]$response.Headers.Location" in lookup
+    assert "$failed = $_.Exception.Response" in lookup
 
 
 def test_the_windows_capability_steps_exist_and_are_skippable() -> None:
@@ -902,6 +954,7 @@ def test_the_font_step_is_skippable_and_runs_before_the_launch() -> None:
     assert main_body.index("install_cjk_fonts") < main_body.index("launch_web")
 
 
+@POSIX_SH_ONLY
 def test_a_linux_host_with_a_han_face_downloads_nothing_and_keeps_its_previews(tmp_path: Path) -> None:
     """LibreOffice reads the same fontconfig as fc-list on Linux, so a Chinese
     family listed there is one a page is drawn with."""
@@ -916,6 +969,7 @@ def test_a_linux_host_with_a_han_face_downloads_nothing_and_keeps_its_previews(t
     assert calls == []
 
 
+@POSIX_SH_ONLY
 def test_a_linux_host_without_one_gets_the_face_and_loses_its_stale_previews(tmp_path: Path) -> None:
     harness = _font_step_harness(tmp_path, **_published_face(tmp_path))
     result, calls, cached, home = _run_font_step(tmp_path, harness, os_name="linux", tools=("soffice",))
@@ -927,6 +981,7 @@ def test_a_linux_host_without_one_gets_the_face_and_loses_its_stale_previews(tmp
     assert not cached.exists(), "a preview cached before the face existed shows boxes forever"
 
 
+@POSIX_SH_ONLY
 def test_a_download_that_does_not_match_its_digest_is_not_installed(tmp_path: Path) -> None:
     """A truncated or substituted OTF still parses and draws nothing, which is
     exactly the failure the step is for -- so a mismatch installs nothing."""
@@ -943,6 +998,7 @@ def test_a_download_that_does_not_match_its_digest_is_not_installed(tmp_path: Pa
     assert cached.is_file()
 
 
+@POSIX_SH_ONLY
 def test_a_download_that_cannot_be_hashed_is_not_installed(tmp_path: Path) -> None:
     """With neither sha256sum nor shasum there is no digest to compare, and an
     unchecked download is the truncated face this step exists to keep out."""
@@ -954,6 +1010,7 @@ def test_a_download_that_cannot_be_hashed_is_not_installed(tmp_path: Path) -> No
     assert cached.is_file()
 
 
+@POSIX_SH_ONLY
 def test_a_mac_is_left_alone_by_the_font_step(tmp_path: Path) -> None:
     """A Mac already ships Han faces, and raven links them into LibreOffice's
     profiles itself (raven/utils/office.py): no download, no password, and no
@@ -1045,6 +1102,7 @@ def _run_office_step(tmp_path: Path, harness: Path, dmg: bytes = b"a dmg that is
     return result, calls, apps, home
 
 
+@POSIX_SH_ONLY
 def test_a_mac_without_homebrew_still_gets_libreoffice(tmp_path: Path) -> None:
     """Deck preview is the render-truth capability, and it was off on every Mac
     without Homebrew: the script only warned. The release dmg is fetched,
@@ -1069,6 +1127,7 @@ def test_a_mac_without_homebrew_still_gets_libreoffice(tmp_path: Path) -> None:
     assert [p.name for p in tmp_path.glob("raven-libreoffice.*")] == [], "the download does not outlive the step"
 
 
+@POSIX_SH_ONLY
 def test_a_dmg_that_does_not_match_its_digest_is_never_mounted(tmp_path: Path) -> None:
     """An app copied from an image nobody verified is the one thing worse than
     no preview. Both sources are tried, then the step gives up and says so."""
@@ -1085,6 +1144,7 @@ def test_a_dmg_that_does_not_match_its_digest_is_never_mounted(tmp_path: Path) -
     assert "libreoffice.org" in result.stderr
 
 
+@POSIX_SH_ONLY
 def test_an_app_already_in_applications_gets_a_launcher_and_no_second_copy(tmp_path: Path) -> None:
     """The libreoffice.org dmg puts nothing on PATH. Downloading again would
     copy a second bundle over the one the user installed."""
@@ -1101,6 +1161,7 @@ def test_an_app_already_in_applications_gets_a_launcher_and_no_second_copy(tmp_p
     assert (home / ".local" / "bin" / "soffice").is_file()
 
 
+@POSIX_SH_ONLY
 def test_a_launcher_that_cannot_be_written_does_not_abort_the_install(tmp_path: Path) -> None:
     """The step is best effort: an existing app whose launcher cannot be written
     (here ~/.local is a file, which blocks root as well) is a warning, and the
@@ -1123,6 +1184,7 @@ def test_a_launcher_that_cannot_be_written_does_not_abort_the_install(tmp_path: 
     assert calls == []
 
 
+@POSIX_SH_ONLY
 def test_a_linux_host_without_libreoffice_downloads_no_font(tmp_path: Path) -> None:
     """The LibreOffice offer declined, or a distro without apt: nothing will
     render, so the 8 MB face would be fetched for nobody."""
@@ -1136,6 +1198,7 @@ def test_a_linux_host_without_libreoffice_downloads_no_font(tmp_path: Path) -> N
     assert cached.is_file()
 
 
+@POSIX_SH_ONLY
 def test_the_pinned_face_by_name_counts_as_a_han_face(tmp_path: Path) -> None:
     """A host with the fontconfig library but no fc-list binary: the file this
     step installs, found by its own name, means a second run downloads nothing."""
