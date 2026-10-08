@@ -1279,7 +1279,28 @@ def resolve_provider_credentials(name: str, *, config_path: Path | None = None) 
         # second let the same bad config raise from one line higher.
         cls = _provider_schema_cls(name)
         instance = cls()
-    endpoints = provider_endpoints(instance)
+    api_base, api_key, _ = provider_connection(name, instance)
+    if not api_key or not api_base:
+        return None
+    return api_base, api_key
+
+
+def provider_connection(name: str, section: Any) -> tuple[str, str, dict[str, str]]:
+    """The address, key and headers a request to ``name`` goes out on, read off ``section``.
+
+    The selection :func:`resolve_provider_credentials` makes, for a caller already
+    holding the validated section (or ``None`` for none): the first endpoint with a
+    key, else the first endpoint's address, then the spec's default. The headers
+    are that same endpoint's, the section's flat ones included where it names
+    none -- a url/key/header group is reachable only whole. Any part may come back
+    empty -- an OAuth seat hands out no key, and a vendor nothing here knows an
+    address for has none -- and what an empty part means is the caller's to say.
+    """
+    name = canonical_provider_name(name)
+    spec = _provider_spec(name)
+    if spec is not None and spec.is_oauth:
+        return "", "", {}
+    endpoints = provider_endpoints(section) if section is not None else []
     endpoint = next((ep for ep in endpoints if ep.api_key), endpoints[0] if endpoints else None)
     api_key = endpoint.api_key if endpoint else ""
     api_base = (
@@ -1292,9 +1313,8 @@ def resolve_provider_credentials(name: str, *, config_path: Path | None = None) 
         # provider had no usable credential.
         or _PROVIDER_BASE_URL_FALLBACK.get(name, "")
     )
-    if not api_key or not api_base:
-        return None
-    return str(api_base).rstrip("/"), str(api_key)
+    headers = dict(endpoint.extra_headers or {}) if endpoint else {}
+    return str(api_base or "").rstrip("/"), str(api_key or ""), headers
 
 
 def test_provider(
