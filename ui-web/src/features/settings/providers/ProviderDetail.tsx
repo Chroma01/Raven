@@ -75,6 +75,30 @@ function AddressRow({ p, label, sub, placeholder }: {
 
 function Connection({ p }: { p: ProviderRow }): JSX.Element {
   const [key, setKey] = useState('')
+  /* The saved key the eye put in the field, while it is still there as it came:
+     shut, the field empties again rather than holding a "new" key that is the
+     old one. Edited, it is the reader's own and stays. A read that fails has
+     already said so (the source's toast), and the eye opens on the field as it
+     is. */
+  const [revealed, setRevealed] = useState('')
+  /* Which read is the current one. Typing, or pressing the eye again, retires
+     the one in flight: its answer arriving after a reader started typing a
+     replacement would overwrite what they typed with the key they are
+     replacing. */
+  const asked = useRef(0)
+  const peek = async (shown: boolean): Promise<void> => {
+    const ask = ++asked.current
+    if (!shown) {
+      if (revealed && key === revealed) setKey('')
+      setRevealed('')
+      return
+    }
+    if (key) return
+    const saved = await store.source().revealKey(p.id)
+    if (ask !== asked.current || !saved) return
+    setKey(saved)
+    setRevealed(saved)
+  }
   const [base, setBase] = useState(p.apiBase || rawStr(store.get().snap.raw, p.id, 'apiBase') || p.defaultApiBase || '')
   const kind = kindOf(p)
   const checking = store.isBusy(busy(p.id))
@@ -88,14 +112,17 @@ function Connection({ p }: { p: ProviderRow }): JSX.Element {
      field for, and sending it stored an address nobody typed. */
   const basePlace = kind === 'oauth' ? null : !needsKey(p) && takesBase(p) ? 'above' : !takesKey(p) ? 'alone' : null
   const save = (): void => {
-    const k = key.trim()
+    /* A key the eye put there, unedited, is the stored one: saving it again
+       would rewrite the config (and restart EverOS when one of its roles runs
+       here) for no change, so it goes as an empty field does. */
+    const k = key === revealed ? '' : key.trim()
     const b = base.trim()
     if (needsKey(p) && !k && !p.on) { store.refuse(t('gui.settings.providers.key_first')); return }
     if (takesBase(p) && !b) { store.refuse(t('gui.settings.providers.base_first')); return }
     const params: Record<string, unknown> = { slug: p.id }
     if (k) params.api_key = k
     if (b && basePlace) params.api_base = b
-    void store.connect(busy(p.id), p.id, params).then((ok) => { if (ok) setKey('') })
+    void store.connect(busy(p.id), p.id, params).then((ok) => { if (ok) { setKey(''); setRevealed('') } })
   }
   const btn = p.on ? t('gui.settings.update') : t('gui.settings.providers.connect')
   const tested = !!store.get().probes[p.id] || store.isBusy(`probe:${p.id}`)
@@ -130,7 +157,9 @@ function Connection({ p }: { p: ProviderRow }): JSX.Element {
           <span className="settings-taglist">
             <KeyInput className="settings-tbox" value={key} aria-label={t('gui.settings.providers.api_key')}
               placeholder={p.on ? t('gui.settings.key_set_ph') : t('gui.settings.providers.paste_key')}
-              onChange={(e) => setKey(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !checking) save() }} />
+              onPeek={p.on ? peek : undefined}
+              onChange={(e) => { asked.current++; setKey(e.currentTarget.value) }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !checking) save() }} />
             {needsKey(p) && <button type="button" className="mini" disabled={checking} onClick={save}>{btn}</button>}
             {!needsKey(p) && <button type="button" className="mini ghost" disabled={checking} onClick={save}>{t('gui.settings.update')}</button>}
           </span>
