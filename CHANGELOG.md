@@ -217,6 +217,48 @@ All notable changes to Raven are documented here.
   `PPT_IMAGE_PROVIDER` puts a deck's pictures on a provider of its own. See
   `docs/minimax-media.md`.
 
+- Raven reads the **portable Agent Plugins 1.0** package format: a directory
+  whose root holds a `plugin.json` that validates against the official
+  manifest schema, with optional `skills/` and `mcp.json`. It is not the
+  Raven plugin (`raven-plugin.toml`, Python factories running inside the
+  host) -- a package is data only. `raven agent-plugins list | inspect |
+  import | remove | check` reads them; an import copies the package's skills
+  into the workspace skill tree under `<workspace>/skills/<package name>/`,
+  one directory per package, so the pool mints one source label per package
+  and two packages may ship the same skill name without either shadowing
+  the other. The copy is recorded in a ledger (`<home>/agent-plugins.json`),
+  so `remove` only ever deletes directories the ledger claims and `check`
+  reports a package that changed since the import. A package cannot put text
+  into every turn: the `always` flag is dropped from the imported copy. A
+  skill on `skillForge.blocklist`, or one whose body points at another
+  product's home directory, is refused, and a target directory the ledger
+  does not claim is never written into. See
+  `docs/specs/2026-10-25-agent-plugins-loader-design.md`.
+
+- A portable Agent Plugin package can now ship **MCP servers** in its
+  `mcp.json`, and Raven reads and runs them. Every entry is validated
+  against the format's closed variants (stdio, Streamable HTTP, legacy
+  HTTP+SSE) and one bad entry never takes the others down: it is skipped
+  and reported. The servers are named `<package>__<server>` so they cannot
+  collide with the host's own `tools.mcpServers`, they run with the
+  package root as their working directory, and they get `PLUGIN_ROOT` and
+  `PLUGIN_DATA` in their environment, with the format's two placeholders
+  expanded in their arguments, environment and working directory. A
+  package's server is a process on the operator's machine, so it starts
+  only when the package is named in `agentPlugins.mcpPackages`; by default
+  the configuration is parsed, validated and reported only.
+  `MCPServerConfig` gained `cwd`, which the stdio transport passes to the
+  MCP SDK, and `SandboxExecutor.start_process` gained an optional `cwd` so
+  a sandboxed server runs in the directory it names instead of being
+  refused; the boxlite executor translates the command, arguments and
+  environment to their guest mounts too, and a package's data root is
+  mounted at `/plugin-data` so `PLUGIN_DATA` is reachable inside the VM. A
+  package server never replaces an operator-configured one: a name
+  collision is reported and the host's entry wins. Re-importing a package
+  also removes the skills it no longer ships, keeping the ledger's claim on
+  a copy whose deletion failed, so the workspace converges on the package. `raven agent-plugins list` and `inspect` show
+  a package's servers and their problems without starting anything.
+
 ### Changed
 
 - A complete install now carries the `everos-cloud-memory` plugin, so the
