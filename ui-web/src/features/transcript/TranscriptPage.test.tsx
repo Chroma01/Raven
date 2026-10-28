@@ -777,7 +777,7 @@ describe('transcript island, history', () => {
     /* One minute of work under a header that said eleven, because the span was
        measured from the question ten minutes before the cron entry. */
     const folds = Array.from(document.querySelectorAll('.tfold'))
-    expect(folds.map((f) => f.querySelector('.tfh .tm')?.textContent)).toEqual(['1m00s'])
+    expect(folds.map((f) => f.querySelector('.tfh .tm')?.textContent)).toEqual(['1m 0s'])
   })
 
   it('gives a delegated turn its own fold instead of rewriting the last one', () => {
@@ -807,7 +807,7 @@ describe('transcript island, history', () => {
        rather than wearing the twenty seconds the delivered turn took. */
     openFolds()
     const folds = Array.from(document.querySelectorAll('.tfold'))
-    expect(folds.map((f) => f.querySelector('.tfh .tm')?.textContent)).toEqual(['5m00s', '20s'])
+    expect(folds.map((f) => f.querySelector('.tfh .tm')?.textContent)).toEqual(['5m 0s', '20s'])
     expect(folds.map((f) => f.querySelectorAll('.tfb .step').length)).toEqual([1, 1])
     expect((folds[0] as HTMLElement).querySelector('.think .lb')?.textContent).toBe('en:gui.think.label')
   })
@@ -1339,6 +1339,79 @@ describe('a thought box while the model is still thinking', () => {
     expect(think.classList.contains('open')).toBe(false)
     expect(think.querySelector('.lb')?.textContent).toBe('en:gui.think.live')
     expect(cot().hidden).toBe(true)
+  })
+
+  it('clocks a live thought and reports the span it took once it stops', () => {
+    vi.useFakeTimers()
+    try {
+      let st!: ReturnType<typeof mount.step>
+      act(() => {
+        mount.ask('why did it fail')
+        st = mount.step()
+        st.thinkAppend('first line')
+        st.reveal()
+      })
+      const label = (): string => (document.querySelector('.msg.ai .think .lb') as HTMLElement).textContent as string
+      expect(label()).toBe('en:gui.think.live')
+
+      act(() => { vi.advanceTimersByTime(5_000) })
+      expect(label()).toBe('en:gui.think.live (5s)')
+
+      act(() => { st.thinkDone() })
+      /* The translator mock keeps the key and its variables, so this is the
+         page's own template (`{label} for {t}`) with the real elapsed value. */
+      expect(label()).toBe('en:gui.transcript.think_done {"label":"en:gui.think.label","t":"5s"}')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('adds the shared long-run phrase at 8s, a second at 18s, and no more', () => {
+    vi.useFakeTimers()
+    try {
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0)
+      act(() => {
+        mount.ask('wait for it')
+        mount.step().tool('read_file', { path: '/tmp/a.log' }, null)
+      })
+      const row = (): Element => [...document.querySelectorAll('.wrow')].at(-1)!
+      expect(row().querySelector('.transcript-charm')).toBeNull()
+
+      act(() => { vi.advanceTimersByTime(8_000) })
+      expect(row().querySelector('.transcript-charm')!.textContent).toBe('still cooking…')
+
+      /* The second draw is a different word, so the DOM can tell the second
+         charm from the first; the row still carries one, not a stack. */
+      random.mockReturnValue(0.9)
+      act(() => { vi.advanceTimersByTime(10_000) })
+      expect(row().querySelectorAll('.transcript-charm')).toHaveLength(1)
+      expect(row().querySelector('.transcript-charm')!.textContent).toBe('asking the void nicely…')
+
+      act(() => { vi.advanceTimersByTime(10_000) })
+      expect(row().querySelector('.transcript-charm')!.textContent).toBe('asking the void nicely…')
+      expect(row().querySelectorAll('.transcript-charm')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops the phrase when the tool finishes', () => {
+    vi.useFakeTimers()
+    try {
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      let call!: ReturnType<ReturnType<typeof mount.step>['tool']>
+      act(() => {
+        mount.ask('wait for it')
+        call = mount.step().tool('read_file', { path: '/tmp/a.log' }, null)
+      })
+      act(() => { vi.advanceTimersByTime(8_000) })
+      expect(document.querySelector('.transcript-charm')).not.toBeNull()
+
+      act(() => { call.done(true, 'line1', 12) })
+      expect(document.querySelector('.transcript-charm')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('follows a chunk far bigger than the old forty-pixel threshold', async () => {
@@ -4021,7 +4094,7 @@ describe('transcript island, delegated calls', () => {
     const shown = card.querySelector('.dgr')!.textContent as string
     expect(shown).toContain(store.durText(180_000))
     /* Not the near-zero call time, as a whole reading rather than a digit
-       that happens to occur inside the correct one ("3m00s" ends in the
+       that happens to occur inside the correct one ("3m 0s" ends in the
        same two characters `durText(5)` would print on its own). */
     expect(shown).not.toMatch(/(?<!\d)0s\b/)
   })
