@@ -29,9 +29,12 @@ irm https://raw.githubusercontent.com/EverMind-AI/Raven/refs/heads/main/install.
 The installer puts uv, Node.js 22, Raven and its plugins in place, downloads the
 browser runtime and the word dictionary and PDF models the knowledge reader uses
 (about 110 MB), installs or offers LibreOffice, and then finishes by opening
-Raven in your browser. First-run setup happens on that page. The installer holds
-the terminal while the page is up; press Ctrl-C to stop it, then start Raven
-again with:
+Raven in your browser. First-run setup happens on that page. When a download
+host cannot be reached, the installer falls back to a mirror and says so, except
+for Raven's own release files, which come from GitHub Releases and have no
+mirror; `RAVEN_NO_MIRROR=1` keeps every download on its default host. The
+installer holds the terminal while the page is up; press Ctrl-C to stop it, then
+start Raven again with:
 
 ```bash
 raven web
@@ -69,14 +72,23 @@ start Raven again:
 raven web
 ```
 
+Neither `raven upgrade` nor the update row downloads the knowledge reader's
+word dictionary and PDF models (about 110 MB). An install that has never
+fetched them runs this once:
+
+```bash
+raven resources
+```
+
 `raven upgrade` installs the latest stable release together with the plugin
 wheels it ships. It never picks up a pre-release unless this install has joined
 the beta channel (a `~/.raven/beta.json` that only the beta installer writes).
 `raven upgrade --check` reports whether a newer release exists without
-installing it. Editable source checkouts are never overwritten: `raven upgrade`
-reports the checkout path and how far it is ahead of or behind `origin/main`,
-and the remedy is `git pull && ./install.sh` in the checkout. Rerunning the
-one-line installer also upgrades, and ends on the running page.
+installing it. Editable source checkouts are never overwritten, and a page
+served by one refuses the update row as well: `raven upgrade` reports the
+checkout path and how far it is ahead of or behind `origin/main`, and the remedy
+is `git pull && ./install.sh` in the checkout. Rerunning the one-line installer
+also upgrades, and ends on the running page.
 
 ## Release Status
 
