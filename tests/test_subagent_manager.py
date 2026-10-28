@@ -26,6 +26,7 @@ import pytest
 from pydantic import ValidationError
 
 from raven.agent import workdir
+from raven.agent.context.silence import SILENCE_INSTRUCTION
 from raven.agent.subagent import manager as manager_mod
 from raven.agent.subagent.backends.base import clamp_output
 from raven.agent.subagent.builtin_agents import GENERIC_AGENT
@@ -3466,6 +3467,82 @@ async def test_a_reply_that_stays_blank_fails_and_names_the_blank(tmp_path) -> N
     assert len(provider.calls) == 2
 
 
+class _FinishScriptedProvider(LLMProvider):
+    """Answers each call with a scripted reply and finish reason, the shapes the
+    providers report since they stopped calling every finish ``stop``."""
+
+    def __init__(self, replies: list[LLMResponse]) -> None:
+        super().__init__(api_key="test")
+        self.calls: list[list[dict[str, Any]]] = []
+        self._replies = list(replies)
+
+    def get_default_model(self) -> str:
+        return "stub"
+
+    async def chat(self, messages, tools=None, model=None, **kwargs):
+        self.calls.append(list(messages))
+        return self._replies.pop(0)
+
+
+async def test_a_refusal_with_its_explanation_is_the_run_s_answer(tmp_path) -> None:
+    """A refusal arrives as its explanation with ``finish_reason="refusal"``. The
+    sub-agent lane keeps its own recovery: a visible reply is the answer, so the
+    run completes on the model's words after one call, with no wrap-up."""
+    from raven.agent.subagent.backends.raven_loop import RavenLoopBackend
+
+    provider = _FinishScriptedProvider([LLMResponse(content="I can't help with that.", finish_reason="refusal")])
+    backend = RavenLoopBackend(provider=provider, model="stub", agent_home=tmp_path)
+
+    out = await backend.run("do it", task_id="r1", workspace=tmp_path, executor=None)
+
+    assert out == "I can't help with that."
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("finish", ["content_filter", "refusal", "unknown"])
+async def test_a_textless_declined_or_unfinished_reply_is_a_blank_one(tmp_path, finish) -> None:
+    """With no text, a content filter, a refusal and a missing finish are the
+    blank reply the lane already reads as no answer: one wrap-up call, then the
+    failure that names the blank. Neither side adds a second retry."""
+    from raven.agent.subagent.backends.raven_loop import RavenLoopBackend
+    from raven.contracts.subagent_backend import SubagentNoAnswerError
+
+    provider = _FinishScriptedProvider(
+        [LLMResponse(content=None, finish_reason=finish), LLMResponse(content="", finish_reason=finish)]
+    )
+    backend = RavenLoopBackend(provider=provider, model="stub", agent_home=tmp_path)
+
+    with pytest.raises(SubagentNoAnswerError, match="reply was empty"):
+        await backend.run("do it", task_id="r2", workspace=tmp_path, executor=None)
+
+    assert len(provider.calls) == 2
+
+
+async def test_a_200_response_carrying_an_error_fails_the_run_without_a_wrap_up(tmp_path) -> None:
+    """A 200 whose body is an error now comes back as ``finish_reason="error"``.
+    The lane fails on it as a failed model call, before the blank-reply wrap-up
+    could read its missing answer as a blank one."""
+    from raven.agent.subagent.backends.raven_loop import RavenLoopBackend
+    from raven.contracts.llm_provider import ErrorClassification
+    from raven.contracts.subagent_backend import SubagentNoAnswerError
+
+    provider = _FinishScriptedProvider(
+        [
+            LLMResponse(
+                content="Error: the upstream refused the request",
+                finish_reason="error",
+                error_classification=ErrorClassification(category="invalid_request"),
+            )
+        ]
+    )
+    backend = RavenLoopBackend(provider=provider, model="stub", agent_home=tmp_path)
+
+    with pytest.raises(SubagentNoAnswerError, match=r"model call failed \(invalid_request\)"):
+        await backend.run("do it", task_id="r3", workspace=tmp_path, executor=None)
+
+    assert len(provider.calls) == 1
+
+
 async def test_the_answer_asked_for_after_a_blank_reply_reaches_a_watching_caller(tmp_path) -> None:
     """What a direct chat streams has to end with the reply the record stores:
     once anything has streamed, the turn sends no closing text. The wrap-up
@@ -5111,6 +5188,29 @@ async def test_an_unprompted_report_wakes_the_conversation_a_dag_announce_taught
     assert req.source.channel == "web"
     assert "seed runs finished" in req.text
     assert "Raven-Oncall" in req.text and "ar_ops" in req.text
+
+
+async def test_an_unprompted_report_teaches_the_silence_marker() -> None:
+    """A routine report needs no answer, and the model can only say so with the marker.
+
+    Telling it that "no reply to the user" is needed, without the word for it, got a
+    sentence about nothing delivered to the person. The lesson is the system's own
+    voice, so it sits outside the fence that holds the instance's words.
+    """
+    mgr = _make_manager(max_concurrent=1)
+    submitted: list = []
+    mgr.set_submit(submitted.append)
+    mgr.remember_origin({"channel": "web", "chat_id": "d", "session_key": "web:s1"})
+
+    await mgr.announce_unprompted_turn("web:s1", "Raven-Oncall", "ar_ops", "still running, nothing new")
+
+    assert len(submitted) == 1
+    text = submitted[0].text
+    assert text.count(SILENCE_INSTRUCTION) == 1
+    assert text.endswith("\n\n" + SILENCE_INSTRUCTION)
+    assert text.rindex(SILENCE_INSTRUCTION) > text.rindex("END UNTRUSTED")
+    assert "no reply to the user are needed" not in text
+    assert "If it is routine progress only, no action is needed." in text
 
 
 async def test_a_direct_chat_instance_teaches_the_route_back(tmp_path, monkeypatch) -> None:

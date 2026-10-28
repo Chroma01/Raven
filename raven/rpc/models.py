@@ -563,11 +563,17 @@ class EpisodeStartEvent(_Strict):
 class NoticePayload(_Strict):
     kind: str = Field(
         ...,
-        description="Which runtime decision this reports: `action_blocked`, `llm_retry` or `organ_degraded`.",
+        description=(
+            "Which runtime decision this reports: `action_blocked`, `llm_retry`, `organ_degraded` or `silent_turn`."
+        ),
     )
     detail: str = Field(
         "",
-        description="What `kind` says it is: the blocking tool's own first line, the failed call's error category, or the organ that dropped out.",
+        description=(
+            "What `kind` says it is: the blocking tool's own first line, the failed call's error category "
+            "(or `empty_reply` / `thinking_only` for the wait before an empty-reply resend or a reasoning "
+            "step-down), or the organ that dropped out. Empty for `silent_turn`."
+        ),
     )
     transient: bool = Field(
         False,
@@ -3986,6 +3992,28 @@ class TranscriptMessage(_Strict):
             "opened one. A reader draws it INSIDE the turn: no new turn number, no fold "
             "closed over the narration above it, and the text before it is still that "
             "turn's narration rather than its answer."
+        ),
+    )
+    silent: bool | None = Field(
+        default=None,
+        description=(
+            "Set on an assistant entry whose text, the model's last word in its turn, is its silence "
+            "marker (from a turn the runtime opened, possibly with a note around it), not an "
+            "answer. A reader draws one muted line and never treats `text` as the answer. A turn "
+            "the message tool had already answered can still carry it: that reply reached the "
+            "reader, and a reload draws the muted line after it. Distinct from `notice`, which "
+            "marks a row the runtime wrote; this row is the model's own."
+        ),
+    )
+    replied_via_tool: bool | None = Field(
+        default=None,
+        description=(
+            "Set on one assistant entry of a turn whose reply the message tool sent to the turn's own chat: "
+            "the live turn's verdict, so a send that failed or went to another chat does not set it. The entry "
+            "is the turn's last assistant entry with text or tool calls, not counting a notice the runtime files "
+            "after the turn: the `silent` marker's entry when the turn ends on one, and otherwise, when its last "
+            "reply had no text, the last entry that made a tool call, which need not be the call that sent the "
+            "message. Such a turn answered whatever it ends on, and is not a Silent Turn."
         ),
     )
 

@@ -13,6 +13,7 @@ from loguru import logger
 
 from raven.acp_client import remote_runs
 from raven.agent import workdir
+from raven.agent.context.silence import SILENCE_INSTRUCTION
 from raven.agent.subagent import activity
 from raven.agent.subagent.attachments import retarget_note, with_attachment_note, with_undeliverable_note
 from raven.agent.subagent.backends import (
@@ -2554,7 +2555,9 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences), and do not
 This instance acted on its own schedule -- an armed wake, a watch round -- and said the following without being asked in any current turn:
 {fenced}
 
-Read it against the plan this instance serves. If it reports finished work, results ready to collect, or a decision point, continue that plan now -- dispatch the next round or collect what is ready; do not leave finished work waiting for the owner to notice. If it is routine progress only, no action and no reply to the user are needed."""
+Read it against the plan this instance serves. If it reports finished work, results ready to collect, or a decision point, continue that plan now -- dispatch the next round or collect what is ready; do not leave finished work waiting for the owner to notice. If it is routine progress only, no action is needed.
+
+{SILENCE_INSTRUCTION}"""
         mark = {"kind": "unprompted", "label": f"{agent}/{handle}", "status": "report"}
         # No link: the span current here is whatever the ACP connection's read
         # loop was created under, which has nothing to do with this report.

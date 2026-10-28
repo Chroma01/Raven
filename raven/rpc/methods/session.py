@@ -371,6 +371,11 @@ def _map_to_wire(
     * ``mid_turn`` — set on a user entry the runtime merged into a turn that was
       already running, so a reload draws it inside that turn rather than opening
       a new one around it.
+    * ``silent`` — set on an assistant entry that is the model's silence marker,
+      so a reload draws one muted line rather than the marker as an answer.
+    * ``replied_via_tool`` — set on the last assistant entry with text or tool
+      calls of a turn the message tool answered, so a reader can tell such a turn
+      from a Silent Turn.
 
     ``deliveries_on_disk`` is false for a transcript recorded on another
     machine (an Imported Conversation): its delivered files are drawn as
@@ -409,6 +414,8 @@ def _map_to_wire(
             "origin",
             "delegated",
             "mid_turn",
+            "silent",
+            "replied_via_tool",
             "reasoning_ms",
             "duration_ms",
             "metadata",
@@ -742,8 +749,10 @@ def _session_to_list_item(info: dict[str, Any]) -> dict[str, Any]:
 
     ``updated_at`` is the latest readable conversational message stamp. User,
     assistant, runtime-origin, and delegated entries all move the picker because
-    each adds visible Session content; tool/system records do not. It falls back
-    through metadata to creation time for old sessions.
+    each adds visible Session content; tool/system records do not, and neither
+    does a silent assistant row, which delivered nothing, nor the turn the
+    runtime opened that it closes. It falls back through metadata to creation
+    time for old sessions.
     """
     key = info.get("key", "")
 

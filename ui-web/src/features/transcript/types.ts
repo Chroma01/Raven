@@ -354,6 +354,12 @@ export interface StepHandle {
   setThinkOpen(open: boolean): void
   setSay(text: string): void
   sayDelta(text: string): void
+  /* Take back the reply the step's latest model call streamed -- the prose
+     after the step's last tool call, or all of it in a step that made none:
+     the model ended the turn on its silence marker, so that reply is not an
+     answer. Narration an earlier call said before its tools stays, as a reload
+     draws it. A step left with nothing else on it is removed. */
+  dropReply(): void
   tool(name: string, args: unknown, display?: string | null, callId?: string | null): CallHandle
   seal(): void
 }
@@ -394,6 +400,10 @@ export interface HistoryMessage {
   /* Set on a user entry the runtime merged into a turn already running. It is
      drawn inside that turn -- see the mid-turn branch in history(). */
   mid_turn?: boolean
+  /* Set on an assistant entry that is the model's own silence marker: `text` is
+     the marker, never an answer. It is drawn as one quiet line -- see the silent
+     branch in history(). */
+  silent?: boolean
 }
 
 /* The pull half of the seam. Event pushes arrive through this island's own

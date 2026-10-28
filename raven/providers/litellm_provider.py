@@ -17,7 +17,6 @@ from loguru import logger
 from raven.providers import call_record, prompt_cache
 from raven.providers.base import (
     ChatDelta,
-    ErrorClassification,
     GenerationSettings,
     LLMProvider,
     LLMResponse,
@@ -48,7 +47,7 @@ from raven.providers.transport_failure import (
     native_finish_reason,
     prompt_chars,
     said_nothing,
-    transport_failure_message,
+    transport_failure_response,
     without_sentinels,
 )
 from raven.providers.usage import merge_usage, reported_cost, token_count
@@ -163,6 +162,21 @@ def _cache_tokens(usage: Any) -> tuple[int | None, int | None]:
             _usage_field(usage, "_cache_creation_input_tokens") or None,
         ),
     )
+
+
+def _refusal_of(carrier: Any) -> str | None:
+    """The refusal text a message or delta carries, when the upstream sent one.
+
+    Read with ``getattr`` because the SDK's own types do not declare the field: it
+    is there only when the upstream's body had it. litellm, converting a reply's
+    body, moves every field its ``Message`` does not declare into
+    ``provider_specific_fields``, so an OpenAI-shaped refusal is read there too.
+    """
+    text = getattr(carrier, "refusal", None)
+    if not (isinstance(text, str) and text):
+        extra = getattr(carrier, "provider_specific_fields", None)
+        text = extra.get("refusal") if isinstance(extra, dict) else None
+    return text if isinstance(text, str) and text else None
 
 
 def _reasoning_tokens(usage: Any) -> int | None:
@@ -904,7 +918,10 @@ class LiteLLMProvider(LLMProvider):
                     # actually received (None, then) beside it. A consumer cannot
                     # tell that fabricated stop from a real one otherwise, and a
                     # reply cut mid-thought must not read as a finished one.
-                    if delta.finish_reason and _finish_was_made_up(stream):
+                    # Except a refusal: the upstream did send it, but at a point where
+                    # the wrapper has recorded no finish yet, which is the very state
+                    # that marks a stop as made up.
+                    if delta.finish_reason and delta.finish_reason != "refusal" and _finish_was_made_up(stream):
                         delta.finish_synthesized = True
                     delivered = delivered or bool(delta.content or delta.tool_call_delta)
                     # The terminal delta of a stream that delivered nothing is the
@@ -975,12 +992,18 @@ class LiteLLMProvider(LLMProvider):
             tool_calls = getattr(delta_obj, "tool_calls", None)
             usage = getattr(chunk, "usage", None)
             reasoning_content = getattr(delta_obj, "reasoning_content", None) or None
+            refusal = _refusal_of(delta_obj)
             # Upstream states why it stopped only on the terminal chunk, which
             # otherwise carries no payload at all. Dropping that chunk would
             # discard the one signal that says the response was cut off at the
             # output ceiling rather than finished -- the difference between "the
             # model is done" and "the model was interrupted mid-token".
             finish_reason = getattr(choice, "finish_reason", None) or None
+            if refusal:
+                # The refusal is the reply, and the finish says so: the terminal
+                # chunk after it will only say ``stop``.
+                content = content or refusal
+                finish_reason = "refusal"
 
             tool_call_delta: dict[str, Any] | None = None
             if tool_calls:
@@ -1054,6 +1077,12 @@ class LiteLLMProvider(LLMProvider):
                 "LiteLLM response has {} choices, merged {} tool_calls", len(response.choices), len(raw_tool_calls)
             )
 
+        # Settled before the transport verdict below: a refusal is the reply, and
+        # a reply with strange accounting is still a reply.
+        if refusal := _refusal_of(message):
+            content = content or refusal
+            finish_reason = "refusal"
+
         tool_calls = []
         for tc in raw_tool_calls:
             # Parse arguments from JSON string if needed. Strict first, so that
@@ -1104,7 +1133,7 @@ class LiteLLMProvider(LLMProvider):
         # delivered as an answer is this verdict. Both gates there
         # (`!= "error"`) then work unchanged.
         evidence = flag_transport_failure(
-            # The upstream's own word, not the `or "stop"` default below: a
+            # The upstream's own word, not the `or "unknown"` default below: a
             # provider that sent no finish reason never said this call ended
             # normally, so there is nothing here to disbelieve.
             finish_reason=finish_reason,
@@ -1124,25 +1153,12 @@ class LiteLLMProvider(LLMProvider):
 
         if evidence:
             logger.warning("upstream reported a failed call as a normal end: {}", evidence)
-            return LLMResponse(
-                content=transport_failure_message(evidence),
-                finish_reason="error",
-                usage=usage,
-                error_classification=ErrorClassification(
-                    category="upstream_transport_failure",
-                    # Retried before anything else is tried: the control
-                    # experiment healed on a retry that landed on another
-                    # backend, and there is no partial work to repeat.
-                    retryable=True,
-                    should_fallback=True,
-                ),
-                call_record=record,
-            )
+            return transport_failure_response(evidence, usage=usage, call_record=record)
 
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
-            finish_reason=finish_reason or "stop",
+            finish_reason=finish_reason or "unknown",
             usage=usage,
             reasoning_content=reasoning_content,
             thinking_blocks=thinking_blocks,
