@@ -1261,6 +1261,22 @@ def resolve_provider_credentials(name: str, *, config_path: Path | None = None) 
     when no key is configured, which reads as "not set up" rather than as an
     anonymous request to somebody's paid endpoint.
     """
+    section = _validated_provider_section(name, config_path=config_path)
+    if section is None:
+        return None
+    api_base, api_key, _ = provider_connection(name, section)
+    if not api_key or not api_base:
+        return None
+    return api_base, api_key
+
+
+def _validated_provider_section(name: str, *, config_path: Path | None = None) -> Any | None:
+    """The section a request to ``name`` would be built from, validated.
+
+    ``None`` for an OAuth seat, whose credential is not a key in the config, and
+    for a config that cannot be read. A section that does not validate falls
+    back to the schema's defaults, the same way the request path does.
+    """
     name = canonical_provider_name(name)
     spec = _provider_spec(name)
     if spec is not None and spec.is_oauth:
@@ -1272,18 +1288,27 @@ def resolve_provider_credentials(name: str, *, config_path: Path | None = None) 
         return None
     try:
         cls, _ = _load_provider_endpoints(name, data)
-        instance = cls.model_validate(_raw_section(data, name))
+        return cls.model_validate(_raw_section(data, name))
     except ValidationError:
         # A hand-edited section with a wrong type is not a reason to raise at a
-        # caller that only asked for an address. Both calls are inside the
-        # guard: the loader validates the section too, so catching only the
-        # second let the same bad config raise from one line higher.
-        cls = _provider_schema_cls(name)
-        instance = cls()
-    api_base, api_key, _ = provider_connection(name, instance)
-    if not api_key or not api_base:
-        return None
-    return api_base, api_key
+        # caller that only asked about it. Both calls are inside the guard: the
+        # loader validates the section too, so catching only the second let the
+        # same bad config raise from one line higher.
+        return _provider_schema_cls(name)()
+
+
+def resolve_provider_tls_verify(name: str, *, config_path: Path | None = None) -> bool:
+    """Whether a request to ``name`` checks the endpoint's certificate.
+
+    Read off the same validated section :func:`resolve_provider_credentials`
+    reads, so the verdict and the address it applies to come from one place.
+    ``True`` when there is no section to read -- an OAuth seat, a provider the
+    config does not name, an unreadable file: verification is the default every
+    section has always had, and a caller with no credential to send has nothing
+    for an opt-out to apply to.
+    """
+    section = _validated_provider_section(name, config_path=config_path)
+    return True if section is None else bool(getattr(section, "tls_verify", True))
 
 
 def provider_connection(name: str, section: Any) -> tuple[str, str, dict[str, str]]:
@@ -1410,6 +1435,13 @@ def test_provider(
     # endpoint's headers to its provider). A probe that dropped them reported a
     # working section as `invalid_key`.
     extra_headers = dict(endpoint.extra_headers or {}) if endpoint else {}
+    # Read from the same instance the request path reads (`tls_verify` on the
+    # section): a section that accepts its gateway's self-signed certificate
+    # must not have its settings dialog report a working one as untrusted. The
+    # flag rides only when it turns the knob -- the existing calls keep the
+    # exact shape the probe's fakes were written against.
+    tls_verify = getattr(instance, "tls_verify", True)
+    probe_tls = {} if tls_verify else {"verify": False}
     derived_api_base = False
 
     # Before the token fetch below, which asks a question this backend does not
@@ -1514,7 +1546,12 @@ def test_provider(
         # reason `Authorization` does below: this probe reports on the credential
         # it resolved, not on one the section names beside it.
         return _probe_models_endpoint(
-            url, _with_authoritative(extra_headers, shaped), timeout_s=timeout_s, transport=transport, extras=extras
+            url,
+            _with_authoritative(extra_headers, shaped),
+            timeout_s=timeout_s,
+            transport=transport,
+            **probe_tls,
+            extras=extras,
         )
 
     if not api_base:
@@ -1559,9 +1596,11 @@ def test_provider(
     if spec and spec.name in {"minimax_global", "minimax_cn"} and api_key:
         headers = _with_authoritative(headers, {"x-api-key": api_key})
 
-    result = _probe_models_endpoint(url, headers, timeout_s=timeout_s, transport=transport, extras=extras)
+    result = _probe_models_endpoint(url, headers, timeout_s=timeout_s, transport=transport, **probe_tls, extras=extras)
     if check_credential and api_key and result.get("status") == "valid":
-        result = _confirm_credential(spec, api_base, url, headers, result, timeout_s=timeout_s, transport=transport)
+        result = _confirm_credential(
+            spec, api_base, url, headers, result, timeout_s=timeout_s, transport=transport, **probe_tls
+        )
     if derived_api_base and result.get("status") == "http_404":
         # The address LiteLLM sends completions to is not always where the
         # catalogue lives -- DeepSeek's `/beta` lists no models, which is why
@@ -1682,6 +1721,7 @@ def _confirm_credential(
     *,
     timeout_s: float,
     transport: httpx.BaseTransport | None,
+    verify: bool = True,
 ) -> dict[str, Any]:
     """Whether a 200 from a models endpoint says anything about the key.
 
@@ -1693,13 +1733,14 @@ def _confirm_credential(
     rather than as verified.
     """
     decoy = {name: (f"Bearer {_DECOY_KEY}" if name.lower() == "authorization" else _DECOY_KEY) for name in headers}
-    control = _probe_models_endpoint(url, decoy, timeout_s=timeout_s, transport=transport)
+    probe_kwargs = {} if verify else {"verify": False}
+    control = _probe_models_endpoint(url, decoy, timeout_s=timeout_s, transport=transport, **probe_kwargs)
     if control.get("status") != "valid":
         return result
     check = _CREDENTIAL_CHECKS.get(spec.name) if spec else None
     if check:
         verdict = _probe_models_endpoint(
-            api_base.rstrip("/") + check, headers, timeout_s=timeout_s, transport=transport
+            api_base.rstrip("/") + check, headers, timeout_s=timeout_s, transport=transport, **probe_kwargs
         )
         if verdict.get("status") == "valid":
             return result
@@ -1803,13 +1844,16 @@ def _probe_models_endpoint(
     *,
     timeout_s: float,
     transport: httpx.BaseTransport | None,
+    verify: bool = True,
     extras: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """GET a models endpoint and report the result in the probe's vocabulary.
 
     What to ask and what to send is the caller's answer. A vendor that refuses the
     request every other one accepts is the reason there is more than one caller;
-    how the answer is reported is the same for all of them.
+    how the answer is reported is the same for all of them. ``verify=False``
+    accepts a certificate whose chain the machine holds no root for -- a
+    self-signed gateway, an internal CA -- reading the section's ``tls_verify``.
 
     ``extras`` are sibling catalogues to fold into the same answer -- see
     ``_CATALOGUE_EXTRAS``. They are additions only: one of them refusing, or
@@ -1822,6 +1866,8 @@ def _probe_models_endpoint(
     client_kwargs: dict[str, Any] = {"timeout": timeout_s}
     if transport is not None:
         client_kwargs["transport"] = transport
+    else:
+        client_kwargs["verify"] = verify
 
     try:
         with httpx.Client(**client_kwargs) as client:
@@ -2370,6 +2416,7 @@ __all__ = [
     "provider_field_specs",
     "provider_serving_at",
     "resolve_provider_credentials",
+    "resolve_provider_tls_verify",
     "list_providers",
     "get_provider_config",
     "set_provider_fields",

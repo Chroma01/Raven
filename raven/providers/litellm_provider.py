@@ -11,6 +11,7 @@ import warnings
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import json_repair
 from loguru import logger
 
@@ -52,6 +53,7 @@ from raven.providers.transport_failure import (
 )
 from raven.providers.usage import merge_usage, reported_cost, token_count
 from raven.providers.wire import wire_model
+from raven.security.tls import is_untrusted_certificate
 
 litellm = import_litellm()
 acompletion = litellm.acompletion
@@ -214,6 +216,7 @@ class LiteLLMProvider(LLMProvider):
         disable_auto_cache_control: bool = False,
         extra_body: dict[str, Any] | None = None,
         model_overrides: dict[str, dict[str, Any]] | None = None,
+        tls_verify: bool = True,
         *,
         unparsed_reasoning: bool | None = None,
     ):
@@ -240,6 +243,17 @@ class LiteLLMProvider(LLMProvider):
         self.extra_body = extra_body or {}
         # User-configured per-model parameter overrides; win over the registry's.
         self.model_overrides = model_overrides or {}
+        # A section that opted out of certificate verification sends its calls
+        # through a client built here with verification off; True (the default)
+        # lets LiteLLM build its own verifying client exactly as before.
+        self.tls_verify = tls_verify
+        # Built lazily on the event loop the first call runs on, and shared by
+        # every call this provider makes afterwards.
+        self._verify_off_client: Any | None = None
+        self._verify_off_http_handler: Any | None = None
+        # Whether LiteLLM serves this provider's route through its own HTTP
+        # handler rather than the OpenAI SDK; learned, see `_learn_route_from`.
+        self._on_litellm_http_route = False
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
@@ -575,6 +589,70 @@ class LiteLLMProvider(LLMProvider):
         body.setdefault("reasoning", {"effort": reasoning_effort})
         kwargs["extra_body"] = body
 
+    def _verify_off_client_for_route(self) -> Any:
+        """The client a `tls_verify=False` section hands LiteLLM, of the kind its route adopts.
+
+        LiteLLM sends a request through one of two client families and verifies
+        with whichever it builds: the OpenAI SDK, which adopts a prebuilt
+        `AsyncOpenAI` (custom gateways, LM Studio, ...), or its own HTTP handler,
+        which adopts a prebuilt `AsyncHTTPHandler` (vLLM, Ollama, DeepSeek,
+        Mistral, Gemini, ...). Each ignores the other's kind, and LiteLLM offers
+        no way to ask which one a model takes, so the SDK client goes first and
+        `_learn_route_from` switches. Either one serves every call this provider
+        makes, on the loop the first call ran on; per-call timeouts still apply,
+        because LiteLLM forwards them per request rather than baking them in.
+        """
+        if not self._on_litellm_http_route:
+            return self._prebuilt_openai_client()
+        if self._verify_off_http_handler is None:
+            from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+
+            self._verify_off_http_handler = AsyncHTTPHandler(ssl_verify=False)
+        return self._verify_off_http_handler
+
+    def _learn_route_from(self, exc: BaseException, sent_with: Any) -> bool:
+        """Move to LiteLLM's own HTTP client when `exc` says the SDK one was ignored.
+
+        With verification off, a refused certificate can only mean LiteLLM built
+        a verifying client of its own instead of adopting the one handed over.
+        The handshake fails before the request is written, so sending it again
+        through the other client still sends it once. True when that is what
+        happened and the caller should send again. Asked of the client the call
+        went out with, not of what this provider has learned since: calls that
+        left together through the ignored client each need sending again.
+        """
+        if self.tls_verify or sent_with is not self._verify_off_client or not is_untrusted_certificate(exc):
+            return False
+        self._on_litellm_http_route = True
+        return True
+
+    async def _acompletion(self, kwargs: dict[str, Any]) -> Any:
+        """`acompletion`, sent again through the other client when `_learn_route_from` says so."""
+        try:
+            return await acompletion(**kwargs)
+        except Exception as exc:
+            if not self._learn_route_from(exc, kwargs.get("client")):
+                raise
+        kwargs["client"] = self._verify_off_client_for_route()
+        return await acompletion(**kwargs)
+
+    def _prebuilt_openai_client(self) -> Any:
+        """The `AsyncOpenAI` a `tls_verify=False` section sends calls through on the OpenAI SDK route."""
+        if self._verify_off_client is None:
+            from openai import AsyncOpenAI
+
+            self._verify_off_client = AsyncOpenAI(
+                # A literal, not None: None sends the process's OPENAI_API_KEY
+                # (some other section's) as this one's key. A keyless local
+                # gateway ignores the header; a keyed one 401s the key either
+                # way, so nothing here can misread as success.
+                api_key=self.api_key or "no-key",
+                base_url=self.api_base,
+                http_client=httpx.AsyncClient(verify=False),
+                timeout=self.generation.timeout,
+            )
+        return self._verify_off_client
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -673,7 +751,17 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         try:
-            response = await asyncio.wait_for(acompletion(**kwargs), self.generation.timeout)
+            # A section that opted out of certificate verification sends this
+            # call through its own client: LiteLLM builds a verifying one of its
+            # own, and only a pre-construction hook turns that off. The
+            # `responses` and `anthropic` protocols live in their own providers,
+            # which read the same knob. Built here rather than beside the other
+            # kwargs so that a client that cannot be constructed (httpx refuses
+            # an unparsable proxy setting, say) is classified like any other
+            # provider failure instead of escaping to the caller as an exception.
+            if not self.tls_verify:
+                kwargs["client"] = self._verify_off_client_for_route()
+            response = await asyncio.wait_for(self._acompletion(kwargs), self.generation.timeout)
             return self._parse_response(response, sent_chars=prompt_chars(messages))
         except Exception as e:
             # Return error as content for graceful handling, but classify the
@@ -766,6 +854,10 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_key"] = self.api_key
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        # Same override as chat(): the streaming handlers adopt a prebuilt
+        # client too, so a `tls_verify=False` section streams through it.
+        if not self.tls_verify:
+            kwargs["client"] = self._verify_off_client_for_route()
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
         if self.extra_body:
@@ -781,7 +873,7 @@ class LiteLLMProvider(LLMProvider):
         def _retry_without_breakpoints(exc: Exception) -> bool:
             """Learn the refusal and take the marks off, or say this is not one.
 
-            The one retry this path takes. Restarting a *partially streamed* call
+            One of the retries this path takes. Restarting a *partially streamed* call
             is the problem that kept retry out of here, and this is not that: the
             refusal arrives before any chunk has been handed to the caller, so
             nothing has been said that would have to be unsaid. Without it the
@@ -857,18 +949,22 @@ class LiteLLMProvider(LLMProvider):
             # The open and the first pull are one unit, and the `except` has to
             # cover both: an OpenAI-shaped route raises at the open, and a gateway
             # that defers the request until the first pull raises there instead.
-            try:
-                first = await _open_and_first()
-            except Exception as exc:
-                if not _retry_without_breakpoints(exc):
-                    raise
-                # The refused stream is finished with; closing it before opening
-                # the replacement keeps at most one live at a time. It is None
-                # when the open itself was what failed, and cleared so a second
-                # failure's `finally` does not close the same object twice.
-                await _close(stream)
-                stream = None
-                first = await _open_and_first()
+            # Each retry is taken at most once, so the loop ends.
+            while True:
+                try:
+                    first = await _open_and_first()
+                    break
+                except Exception as exc:
+                    if self._learn_route_from(exc, kwargs.get("client")):
+                        kwargs["client"] = self._verify_off_client_for_route()
+                    elif not _retry_without_breakpoints(exc):
+                        raise
+                    # The refused stream is finished with; closing it before opening
+                    # the replacement keeps at most one live at a time. It is None
+                    # when the open itself was what failed, and cleared so a second
+                    # failure's `finally` does not close the same object twice.
+                    await _close(stream)
+                    stream = None
 
             # The transport facts, read off the wrapper while it still holds
             # them: the accumulator that turns these deltas into a response never

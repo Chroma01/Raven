@@ -29,7 +29,19 @@ from raven.config.update_providers import (
 )
 from raven.config.update_providers import test_provider as probe_provider
 from raven.providers.registry import PROVIDERS as _PROVIDERS
-from tests._tls import OpenAIModels, connect_proxy, https_endpoint, private_ca
+from tests._tls import OpenAIModels, connect_proxy, https_endpoint, keep_loopback_off_proxies, private_ca
+
+# The real probe, kept from module import time: the `_no_provider_probe`
+# autouse fixture replaces the module attribute in every test, and the two
+# tls_verify tests below want the real network path with no `transport` -- the
+# only shape under which the client's `verify` knob applies.
+_REAL_PROBE = probe_provider.__globals__["_probe_models_endpoint"]
+
+
+def _restore_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    import raven.config.update_providers as u
+
+    monkeypatch.setattr(u, "_probe_models_endpoint", _REAL_PROBE)
 
 
 @pytest.fixture
@@ -657,6 +669,69 @@ def test_a_certificate_that_fails_verification_is_named_for_what_it_is(cfg_path:
     with https_endpoint(ca.server, OpenAIModels) as origin:
         set_provider_fields("custom", {"api_key": "k", "api_base": f"{origin}/v1"}, config_path=cfg_path)
         result = probe_provider("custom", config_path=cfg_path, timeout_s=5, transport=httpx.HTTPTransport())
+
+    assert result["ok"] is False
+    assert result["status"] == "certificate_untrusted"
+
+
+def test_a_section_that_opted_out_accepts_the_same_certificate(
+    cfg_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`tls_verify: false` on the section makes its own probe accept what it signed.
+
+    The same gateway that reads `certificate_untrusted` above reads valid here:
+    the field is the section's, so the settings dialog reports the setup the
+    model calls could actually live with. The proxy goes, so the handshake is
+    this machine's alone.
+    """
+    keep_loopback_off_proxies(monkeypatch)
+    _restore_probe(monkeypatch)
+    ca = private_ca(tmp_path / "pki")
+    with https_endpoint(ca.server, OpenAIModels) as origin:
+        set_provider_fields(
+            "custom", {"api_key": "k", "api_base": f"{origin}/v1", "tls_verify": False}, config_path=cfg_path
+        )
+        result = probe_provider("custom", config_path=cfg_path, timeout_s=5)
+
+    assert result["ok"] is True
+    assert result["status"] == "valid"
+
+
+def test_an_opted_out_section_still_tells_an_unchecked_key_from_a_verified_one(
+    cfg_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decoy control rides the same opt-out as the probe it checks.
+
+    This gateway answers any key, so its catalogue says nothing about the one
+    configured. A control refused at the handshake would never see that, and
+    the key would read as verified.
+    """
+    keep_loopback_off_proxies(monkeypatch)
+    _restore_probe(monkeypatch)
+    ca = private_ca(tmp_path / "pki")
+    with https_endpoint(ca.server, OpenAIModels) as origin:
+        set_provider_fields(
+            "custom", {"api_key": "k", "api_base": f"{origin}/v1", "tls_verify": False}, config_path=cfg_path
+        )
+        result = probe_provider("custom", config_path=cfg_path, timeout_s=5, check_credential=True)
+
+    assert result["status"] == "key_unchecked"
+
+
+def test_an_undressed_section_still_verifies(cfg_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A section that names no `tls_verify` verifies, as every section always has.
+
+    The field defaults to True, and the probe of a section that never turned the
+    knob reads the same `certificate_untrusted` result as before.
+    """
+    keep_loopback_off_proxies(monkeypatch)
+    _restore_probe(monkeypatch)
+    ca = private_ca(tmp_path / "pki")
+    with https_endpoint(ca.server, OpenAIModels) as origin:
+        set_provider_fields(
+            "custom", {"api_key": "k", "api_base": f"{origin}/v1", "tls_verify": True}, config_path=cfg_path
+        )
+        result = probe_provider("custom", config_path=cfg_path, timeout_s=5)
 
     assert result["ok"] is False
     assert result["status"] == "certificate_untrusted"
@@ -2331,6 +2406,40 @@ class TestResolveProviderCredentials:
         cfg_path.write_text(json.dumps({"providers": {"openai": {"apiKey": 17}}}), encoding="utf-8")
 
         assert resolve_provider_credentials("openai", config_path=cfg_path) is None
+
+
+class TestResolveProviderTlsVerify:
+    """The TLS verdict read off the same section the credentials come from."""
+
+    def test_an_opted_out_section_resolves_off(self, cfg_path: Path) -> None:
+        from raven.config.update_providers import resolve_provider_tls_verify, set_provider_fields
+
+        set_provider_fields(
+            "custom", {"api_key": "k", "api_base": "https://gw.test/v1", "tls_verify": False}, config_path=cfg_path
+        )
+
+        assert resolve_provider_tls_verify("custom", config_path=cfg_path) is False
+
+    def test_a_section_that_names_nothing_verifies(self, cfg_path: Path) -> None:
+        from raven.config.update_providers import resolve_provider_tls_verify, set_provider_fields
+
+        set_provider_fields("custom", {"api_key": "k", "api_base": "https://gw.test/v1"}, config_path=cfg_path)
+
+        assert resolve_provider_tls_verify("custom", config_path=cfg_path) is True
+
+    def test_an_unreadable_config_verifies(self, cfg_path: Path) -> None:
+        """The safe answer when there is nothing to read: every section's default."""
+        from raven.config.update_providers import resolve_provider_tls_verify
+
+        cfg_path.write_text("{not json", encoding="utf-8")
+
+        assert resolve_provider_tls_verify("custom", config_path=cfg_path) is True
+
+    def test_an_oauth_seat_verifies(self, cfg_path: Path) -> None:
+        """An OAuth seat names no address of its own for an opt-out to apply to."""
+        from raven.config.update_providers import resolve_provider_tls_verify
+
+        assert resolve_provider_tls_verify("openai_codex", config_path=cfg_path) is True
 
 
 # lend_provider_credentials: the three documented outcomes
