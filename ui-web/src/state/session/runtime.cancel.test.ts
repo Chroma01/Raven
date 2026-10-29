@@ -26,6 +26,7 @@ interface CancelReply { cancelled: boolean; busy?: boolean }
 
 async function harness({ turnKept = true, rows = [{ id: 's1' }] as Row[] } = {}) {
   const log: unknown[][] = []
+  const made: Array<{ text: string; sealed: boolean }> = []
   const queue: string[] = []
   const asked: Array<[string, unknown]> = []
   let settleCancel: { res: (reply: CancelReply) => void; rej: (e: unknown) => void } | null = null
@@ -91,17 +92,28 @@ async function harness({ turnKept = true, rows = [{ id: 's1' }] as Row[] } = {})
       'src/features/transcript/mount': {
         nudge: () => {},
         stopStream: () => {},
-        finishTurn: () => log.push(['foldTurn']),
+        finishTurn: (_st: unknown, steps: unknown[]) => log.push(['foldTurn', steps.length]),
         artifacts: () => log.push(['artifacts']),
         turnKept: () => turnKept,
         killStatus: () => log.push(['killStatus']),
-        step: () => ({ seal: () => {}, sayDelta: () => {}, thinkAppend: () => {} }),
+        step: () => {
+          const s = {
+            text: '',
+            sealed: false,
+            seal: () => { s.sealed = true },
+            sayDelta: (t: string) => { s.text += t },
+            thinkAppend: (t: string) => { s.text += t },
+          }
+          made.push(s)
+          return s
+        },
         status: () => {},
       },
       'src/features/transcript/tail': {
         down: () => {},
       },
       'src/features/workspace/store': {
+        advanceTurn: () => {},
         currentTurn: () => 1,
         loadDeliveries: () => {},
       },
@@ -141,6 +153,7 @@ async function harness({ turnKept = true, rows = [{ id: 's1' }] as Row[] } = {})
     settle: (reply: CancelReply = { cancelled: true }) => { settleCancel!.res(reply); return tick() },
     refuse: () => { settleCancel!.rej(new Error('gone')); return tick() },
     did: (name: string) => log.filter((c) => c[0] === name),
+    steps: made,
     tick,
   }
 }
@@ -199,6 +212,98 @@ describe('a cancel in flight', () => {
 
     expect(h.queue).toEqual([])
     expect(h.sent()).toEqual(['the queued one'])
+  })
+})
+
+/* A delta of the stopped turn can still be in flight when the cancel lands, and
+   it opens a step of its own (`ensureStep`). The next turn must not write into
+   that step, whichever frame opens it. */
+describe('the turn after a stop', () => {
+  type Frame = Parameters<Pipeline['dispatch']>[0]
+  type Page = Awaited<ReturnType<typeof harness>>
+
+  const OPENERS: Array<[string, Frame]> = [
+    ['turn.started', { type: 'turn.started', payload: { turn_id: 'B' } }],
+    ['message.start', { type: 'message.start', payload: { content: 'ask B', turn_id: 'B' } }],
+  ]
+
+  const stopOnLateFrame = async (h: Page, late: Frame, reply?: CancelReply): Promise<void> => {
+    h.pipeline.dispatch({ type: 'message.start', payload: { content: 'ask A', turn_id: 'A' } })
+    h.pipeline.dispatch({ type: 'token.delta', payload: { text: 'a1' } })
+    h.runtime.stop()
+    h.pipeline.dispatch(late)
+    h.pipeline.dispatch({ type: 'message.complete', payload: { turn_id: 'A', usage: {} } })
+    await h.settle(reply)
+  }
+
+  it.each(OPENERS)('starts on a clean step when %s follows a late delta', async (_name, opener) => {
+    const h = await harness()
+    await stopOnLateFrame(h, { type: 'token.delta', payload: { text: 'a-tail' } })
+
+    h.pipeline.dispatch(opener)
+    expect(h.runtime.state().steps).toHaveLength(0)
+    h.pipeline.dispatch({ type: 'token.delta', payload: { text: 'b1' } })
+
+    expect(h.steps.map((s) => s.text)).toEqual(['a1', 'a-tail', 'b1'])
+    /* The say buffer is what the turn's preview and notification read. */
+    expect(h.runtime.state().say).toBe('b1')
+    h.pipeline.dispatch({ type: 'message.complete', payload: { turn_id: 'B', usage: {} } })
+    expect(h.rows[0]!.last).toBe('b1')
+  })
+
+  it.each(OPENERS)('starts on a clean step when %s ends a refusal that held the lane', async (_name, opener) => {
+    /* The hold keeps the machine in `streaming` with no turn open, so the
+       phase cannot be what tells a stale step from a live one. */
+    const h = await harness()
+    await stopOnLateFrame(h, { type: 'token.delta', payload: { text: 'a-tail' } }, { cancelled: false, busy: true })
+    expect(turn.phase()).toBe('streaming')
+
+    h.pipeline.dispatch(opener)
+    expect(h.runtime.state().steps).toHaveLength(0)
+    h.pipeline.dispatch({ type: 'token.delta', payload: { text: 'b1' } })
+
+    expect(h.steps.map((s) => s.text)).toEqual(['a1', 'a-tail', 'b1'])
+    expect(h.runtime.state().say).toBe('b1')
+  })
+
+  it('hands the fold no stale step when the next turn ends without prose', async () => {
+    /* A turn stopped before its first token has no prose of its own, so the
+       fold's `said` fallback walks the step list -- and the stopped turn's
+       tail would be promoted as this turn's answer if it were still there. */
+    const h = await harness()
+    await stopOnLateFrame(h, { type: 'token.delta', payload: { text: 'a-tail' } })
+    h.pipeline.dispatch({ type: 'message.start', payload: { content: 'ask B', turn_id: 'B' } })
+
+    h.runtime.stop()
+    await h.settle()
+
+    expect(h.did('foldTurn').at(-1)).toEqual(['foldTurn', 0])
+  })
+
+  it.each([
+    ...OPENERS.map(([name, opener]): [string, (h: Page) => void] => [name, (h) => h.pipeline.dispatch(opener)]),
+    ['a send', (h: Page) => h.runtime.send('ask B')],
+  ])('seals a late thought when %s opens the next turn', async (_name, open) => {
+    const h = await harness()
+    await stopOnLateFrame(h, { type: 'thinking.delta', payload: { text: 'a-thought' } })
+    expect(h.steps[1]).toMatchObject({ text: 'a-thought', sealed: false })
+
+    open(h)
+
+    expect(h.steps[1]!.sealed).toBe(true)
+  })
+
+  it('keeps the open step when a frame opens inside a turn still running', async () => {
+    const h = await harness()
+    h.pipeline.dispatch({ type: 'message.start', payload: { content: 'ask A', turn_id: 'A' } })
+    h.pipeline.dispatch({ type: 'token.delta', payload: { text: 'a1' } })
+
+    h.pipeline.dispatch({ type: 'turn.started', payload: { turn_id: 'B' } })
+    h.pipeline.dispatch({ type: 'token.delta', payload: { text: 'b1' } })
+
+    expect(h.steps.map((s) => s.text)).toEqual(['a1b1'])
+    expect(h.steps[0]!.sealed).toBe(false)
+    expect(h.runtime.state().say).toBe('a1b1')
   })
 })
 
