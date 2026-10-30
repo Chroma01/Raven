@@ -17,6 +17,7 @@ import * as imported from '../features/imported/store'
 import * as settings from '../features/settings/store'
 import * as hub from '../state/hub'
 import * as lang from '../state/lang'
+import * as railState from '../state/rail'
 import { mountPageRoot } from '../test/pageRoot'
 
 /* React refuses act() outside a test runner it recognizes unless told. */
@@ -185,6 +186,112 @@ describe('the rail', () => {
     expect([...wiring.matchAll(/\$\('#newBtn'\)!?\.onclick/g)]).toHaveLength(1)
     const tag = /<button[^>]*id="newBtn"[^>]*>/.exec(source('chrome/Rail.tsx'))
     expect(tag?.[0]).not.toMatch(/onClick/)
+  })
+})
+
+/* The window's width, as `matchMedia` answers it (happy-dom does no layout):
+   an EventTarget carrying `matches`, which is all state/rail.ts reads of it. */
+describe('the rail on a window under the fold', () => {
+  const real = window.matchMedia
+  let narrow = true
+  const click = async (id: string): Promise<void> => {
+    await act(async () => {
+      el(id).click()
+    })
+  }
+
+  beforeEach(() => {
+    narrow = true
+    window.matchMedia = ((q: string) =>
+      Object.assign(new EventTarget(), { matches: narrow, media: q }) as MediaQueryList) as typeof window.matchMedia
+  })
+
+  afterEach(() => {
+    window.matchMedia = real
+    railState.set(true)
+  })
+
+  /* The rail lies over the page there (styles/page.css), so a press that goes
+     somewhere folds it, the way a drawer closes on the choice made in it. */
+  it('folds when a row in it is pressed, and stays for its own controls', async () => {
+    render()
+    railState.set(true)
+    await click('findBtn')
+    expect(railState.get()).toBe(true)
+    await click('agentsBtn')
+    expect(opened.list).toEqual(['hub'])
+    expect(railState.get()).toBe(false)
+    expect(el('railShow').hidden).toBe(false)
+    railState.set(true)
+    await click('meBtn')
+    expect(opened.list).toEqual(['hub', 'settings'])
+    expect(railState.get()).toBe(false)
+  })
+
+  /* The session rows are the rail island's, rendered into #list by a root of
+     its own, so a row is stood in by hand: the press reaches the aside's
+     listener the way the island's would. */
+  it('folds when a session row in the list is pressed', async () => {
+    render()
+    railState.set(true)
+    const row = document.createElement('div')
+    row.className = 'sess'
+    const name = document.createElement('span')
+    row.append(name)
+    el('list').append(row)
+    await act(async () => {
+      name.click()
+    })
+    expect(railState.get()).toBe(false)
+  })
+
+  /* A session row is a div with the button role that opens on Enter or Space
+     in its own handler, and no click follows a key there; its rename box is
+     inside the row, and a press or an Enter in it is the name's, not a pick. */
+  it('folds when a session row is picked by keyboard, and not from its rename box', async () => {
+    render()
+    railState.set(true)
+    const row = document.createElement('div')
+    row.className = 'sess'
+    row.setAttribute('role', 'button')
+    const box = document.createElement('input')
+    box.className = 'ren'
+    row.append(box)
+    el('list').append(row)
+    const key = async (target: Element, key: string): Promise<void> => {
+      await act(async () => {
+        target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+      })
+    }
+    await act(async () => {
+      box.click()
+    })
+    await key(box, 'Enter')
+    expect(railState.get()).toBe(true)
+    await key(row, ' ')
+    expect(railState.get()).toBe(false)
+    railState.set(true)
+    await key(row, 'Enter')
+    expect(railState.get()).toBe(false)
+    railState.set(true)
+    await key(row, 'a')
+    expect(railState.get()).toBe(true)
+  })
+
+  it('keeps standing beside the page on a window that holds both', async () => {
+    narrow = false
+    render()
+    railState.set(true)
+    await click('agentsBtn')
+    expect(opened.list).toEqual(['hub'])
+    expect(railState.get()).toBe(true)
+    const row = document.createElement('div')
+    row.className = 'sess'
+    el('list').append(row)
+    await act(async () => {
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    expect(railState.get()).toBe(true)
   })
 })
 
