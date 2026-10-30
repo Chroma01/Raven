@@ -4241,6 +4241,20 @@ class SettingsGetResult(_Strict):
     settings: dict[str, JsonValue] = Field(..., description="Raw config.json with secret-looking values masked.")
     config_path: str
     raven_version: str
+    skill_hub_on: bool = Field(
+        ...,
+        description=(
+            "Whether conversational Skill Hub retrieval is on, read the way the runtime reads the config: "
+            "an endpoint is required, and enabled=false turns it off."
+        ),
+    )
+    skill_hub_awaiting_reload: bool = Field(
+        ...,
+        description=(
+            "skill_hub_on, while the agent loop serving now was built without a Hub client: "
+            "retrieval starts after a reload."
+        ),
+    )
 
 
 class SettingsSetParams(_Strict):

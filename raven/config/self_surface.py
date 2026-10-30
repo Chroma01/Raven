@@ -32,7 +32,7 @@ import copy
 import json
 import re
 import string
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
@@ -113,6 +113,10 @@ class Setting:
     #: confirmation card words in the reader's language.
     unset_means: str = ""
     unset_to: str = ""
+    #: For a setting that acts only together with other keys (a switch that
+    #: also needs an address), what the runtime runs on, read from the whole
+    #: file: a read shows it beside the stored value, which alone misleads.
+    in_effect: "Callable[[dict[str, Any]], Any] | None" = None
 
     def describe(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -154,6 +158,13 @@ _WEB_FETCH = ("jina", "anysearch", "tavily", "exa", "firecrawl", "keenable")
 _WEB_VENDORS = ("serper", "anysearch", "serpapi", "jina", "tavily", "exa", "brave", "firecrawl", "serply", "keenable")
 
 _E = Effect
+
+
+def _skill_hub_in_effect(raw: dict[str, Any]) -> bool:
+    from raven.config.live import skill_hub_on
+
+    return skill_hub_on(raw)
+
 
 SECTIONS: tuple[Section, ...] = (
     Section(
@@ -546,6 +557,19 @@ SECTIONS: tuple[Section, ...] = (
                 note="the list replaces the stored one; read it first",
             ),
             Setting("skillForge.enabled", "Mount the extra local skill directories", "bool", _E.RELOAD),
+            Setting(
+                "skillForge.router.hub.enabled",
+                "Search the shared Skill Hub during conversations",
+                "bool",
+                _E.IMMEDIATE,
+                writer="settings",
+                sensitive=("turning it back on resumes sending the turn's message text to the Skill Hub"),
+                note=(
+                    "on only while skillForge.router.hub.endpoint is set, which a read shows as in_effect; "
+                    "switching it off applies at once; turning it on may wait for a reload, and the write says so"
+                ),
+                in_effect=_skill_hub_in_effect,
+            ),
             Setting(
                 "skillForge.autoInstall",
                 "Installing a Skill Hub skill the router picked",

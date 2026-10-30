@@ -1662,7 +1662,13 @@ conflating `find_skill` (search, returns ids + descriptions) with `read_skill`
 
 **Skill Hub** (`skill_hub/`):
 A remote OpenAPI skill marketplace, configured via `skillForge.router.hub` (`endpoint` /
-`api_key` / `timeout_s` / `min_safety`; `endpoint=None` disables it). `SkillHubClient` offers
+`enabled` / `api_key` / `timeout_s` / `min_safety`; `endpoint=None` disables it, and
+`enabled=false` switches it off without clearing the URL -- off is read live). Both
+onboarding wizards seed the shared catalog URL and say what that sends; the settings page's
+Skill Hub switch is `enabled`, drawn from `settings.get`'s answer rather than the raw file.
+While on, text from the conversation (a turn's message, or a `find_skill` query) is sent as
+the catalog query.
+`SkillHubClient` offers
 progressive disclosure — `search()` (metadata-only discovery), `get()` (skill body),
 `install()` (download + safe extract); during routing `HubSkillSource` feeds metadata-only
 candidates into the weighted RRF (weight 0.85, below Local 0.96 and Everos 0.9), and the

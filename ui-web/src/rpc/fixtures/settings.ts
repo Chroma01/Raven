@@ -67,6 +67,9 @@ function seed(ext: ExtFixture): Record<string, Json> {
     tools: { disabledTools: ext.disabledTools },
     plugins: { disabled: ext.disabledPlugins },
     permissions: { mode: 'ask' },
+    /* An onboarded install: the settings page draws the Skill Hub switch on
+       and the row's off state is reachable by clicking it. */
+    skillForge: { router: { hub: { endpoint: 'https://skillhub.evermind.ai' } } },
   }
 }
 
@@ -131,6 +134,13 @@ function pick(from: Record<string, Json>, key: string): Json | undefined {
   ), from)
 }
 
+/* The server's Skill Hub answer for the canvas's own store, which only ever
+   holds what the page wrote: an endpoint, and `enabled` as a boolean. */
+const hubOn = (config: Record<string, Json>): boolean => {
+  const endpoint = pick(config, 'skillForge.router.hub.endpoint')
+  return typeof endpoint === 'string' && endpoint !== '' && pick(config, 'skillForge.router.hub.enabled') !== false
+}
+
 /* A ledger with nothing in it. The four `*_missing_calls` counts are part of
    the shape rather than decoration: they are how the panel says an answer is
    incomplete, and zero is the truthful value where nothing was spent. */
@@ -187,6 +197,8 @@ export function createSettings(env: FixtureEnv, ext: ExtFixture): SettingsFixtur
         settings: clone(config),
         config_path: '~/.raven/config.json',
         raven_version: '0.1.0',
+        skill_hub_on: hubOn(config),
+        skill_hub_awaiting_reload: false,
       }),
       'settings.set': (p) => {
         put(config, p.key, p.value)
