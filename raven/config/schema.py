@@ -1018,9 +1018,9 @@ class GatewayConfig(Base):
 
 
 WebSearchProvider = Literal[
-    "serper", "anysearch", "serpapi", "tavily", "exa", "brave", "firecrawl", "serply", "keenable"
+    "serper", "anysearch", "serpapi", "tavily", "exa", "brave", "firecrawl", "serply", "keenable", "deepseek"
 ]
-WebFetchProvider = Literal["jina", "anysearch", "tavily", "exa", "firecrawl", "keenable"]
+WebFetchProvider = Literal["jina", "anysearch", "tavily", "exa", "firecrawl", "keenable", "deepseek"]
 
 #: The bare environment variable each web vendor's tool falls back to when the
 #: config slot is empty, and the name ``~/.raven/env`` mirrors the slot out as.
@@ -1035,6 +1035,7 @@ WEB_VENDOR_ENV_VARS: dict[str, str] = {
     "firecrawl": "FIRECRAWL_API_KEY",
     "serply": "SERPLY_API_KEY",
     "keenable": "KEENABLE_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
 }
 
 
@@ -1068,6 +1069,7 @@ class WebProvidersConfig(Base):
     firecrawl: WebProviderKey = Field(default_factory=WebProviderKey)
     serply: WebProviderKey = Field(default_factory=WebProviderKey)
     keenable: WebProviderKey = Field(default_factory=WebProviderKey)
+    deepseek: WebProviderKey = Field(default_factory=WebProviderKey)
 
     def key_for(self, vendor: str) -> str:
         """One vendor's configured key, or an empty string for an unknown vendor."""
@@ -1131,6 +1133,103 @@ class WebToolsConfig(Base):
             if key := self.vendor_key(vendor):
                 out[vendor] = key
         return out
+
+
+#: Web vendors whose API runs on the same account as an LLM provider, so the
+#: key already configured for chat pays for search and fetch too. The web slot
+#: stays optional: a key written there wins over the borrowed one, and an empty
+#: slot is the ordinary state rather than a revocation.
+WEB_VENDOR_BORROWED_KEYS: dict[str, str] = {"deepseek": "deepseek"}
+
+
+def web_vendor_llm_source(vendor: str) -> str:
+    """The LLM provider a web vendor borrows its key from, or ``""``."""
+    return WEB_VENDOR_BORROWED_KEYS.get(vendor, "")
+
+
+#: The first-party web host each borrowing vendor's endpoints live on. A key
+#: borrowed from the model provider is issued for this host; a section pointed
+#: anywhere else (a relay, a corporate gateway) lends nothing to the web tool,
+#: whose endpoints are literals.
+WEB_VENDOR_WEB_HOSTS: dict[str, str] = {"deepseek": "api.deepseek.com"}
+
+
+def is_web_vendor_address(vendor: str, api_base: str) -> bool:
+    """Whether ``api_base`` is ``vendor``'s own web host."""
+    host = WEB_VENDOR_WEB_HOSTS.get(vendor)
+    if not host:
+        return False
+    try:
+        return urlparse(api_base).hostname == host
+    except ValueError:
+        return False
+
+
+def _borrowed_key_for_section(vendor: str, section: Any) -> str:
+    """The key a model-provider section lends to ``vendor``'s web tools, or ``""``.
+
+    Resolved through ``provider_connection`` so the key, address and headers are
+    one group: an endpoint's key travels only with that endpoint's address, and
+    a section aimed at another host lends nothing to a tool whose endpoint is a
+    literal.
+    """
+    source = web_vendor_llm_source(vendor)
+    if not source or section is None:
+        return ""
+    from raven.config.update_providers import provider_connection
+
+    try:
+        api_base, api_key, _headers = provider_connection(source, section)
+    except Exception:  # noqa: BLE001 - a section the resolver cannot read lends nothing
+        return ""
+    return str(api_key or "") if is_web_vendor_address(vendor, api_base) else ""
+
+
+def borrowed_web_key(vendor: str, providers: Any) -> str:
+    """The LLM credential a web vendor may borrow, or ``""``.
+
+    ``providers`` is either the validated ``ProvidersConfig`` or the raw
+    ``providers`` subtree from the config file; both answer the same key, and a
+    vendor this deployment does not configure answers an empty one. A section
+    that resolves to another host answers an empty one too: its key was issued
+    for that host, not for the web endpoints this tool calls.
+    """
+    source = web_vendor_llm_source(vendor)
+    if not source:
+        return ""
+    if isinstance(providers, dict):
+        try:
+            section = _provider_section(providers, source)
+        except Exception:  # noqa: BLE001 - a malformed section is validated by the loader
+            return ""
+        return _borrowed_key_for_section(vendor, section)
+    try:
+        section = providers.get(source)
+    except Exception:  # noqa: BLE001 - an undeclared section is validated only when read
+        return ""
+    return _borrowed_key_for_section(vendor, section)
+
+
+def live_borrowed_web_answer(vendor: str, providers_section: Any) -> tuple[bool, str | None]:
+    """The file's answer for a borrowing vendor: ``(named, key)``.
+
+    ``named`` False means the file says nothing about the provider, so the boot
+    value stays in charge. ``named`` True with ``key`` None means the file names
+    it with a section the schema rejects -- the live reader admits that state
+    through its last-good memory rather than rolling the credential back.
+    ``named`` True with a string is the answer this edit grants, possibly ``""``
+    when the section resolves to another host.
+    """
+    source = web_vendor_llm_source(vendor)
+    if not source or not isinstance(providers_section, dict):
+        return False, None
+    try:
+        section = _provider_section(providers_section, source)
+    except Exception:  # noqa: BLE001 - a bad edit keeps the last admitted key
+        return True, None
+    if section is None:
+        return False, None
+    return True, _borrowed_key_for_section(vendor, section)
 
 
 class ExecToolConfig(Base):
@@ -2568,6 +2667,24 @@ class Config(BaseSettings):
             if isinstance(configured, str) and configured.strip():
                 found[name] = configured.strip()
         return found
+
+    def effective_web_vendor_key(self, vendor: str) -> str:
+        """One web vendor's key: its own slot, else the LLM provider it borrows from.
+
+        DeepSeek serves its search and fetch endpoints on the account its chat
+        API already uses, so a deployment that configured the model does not
+        have to paste the key a second time under ``tools.web``. A key written
+        to the vendor slot still wins; a deployment with neither answers ``""``.
+        """
+        return self.tools.web.vendor_key(vendor) or borrowed_web_key(vendor, self.providers)
+
+    def effective_web_vendor_keys(self) -> dict[str, str]:
+        """Every web vendor with a resolved credential, the borrowed ones included."""
+        return {
+            vendor: key
+            for vendor in type(self.tools.web.providers).model_fields
+            if (key := self.effective_web_vendor_key(vendor))
+        }
 
     def effective_media_config(self) -> MediaGenConfig:
         """Media config resolved for registration and auth.

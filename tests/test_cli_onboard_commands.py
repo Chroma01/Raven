@@ -8659,3 +8659,24 @@ def test_a_narrower_embedding_model_still_fails_the_wizard_check(monkeypatch: py
     monkeypatch.setattr(onboard_everos, "_probe_embedding_dim", lambda url, headers, model: 768)
 
     assert not onboard_everos._verify_embedding_dim(model="m", api_key="k", base_url="http://p", non_interactive=True)
+
+
+def test_the_wizard_reads_a_borrowed_web_key(tmp_path: Path) -> None:
+    """A DeepSeek key under providers.* pays for the web tools too, so the
+    wizard must not ask for a second one -- or probe with an empty string."""
+    import json
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"providers": {"deepseek": {"apiKey": "sk-llm"}}}), encoding="utf-8")
+    set_config_path(cfg)
+    try:
+        assert onboard_web._stored_key("deepseek") == "sk-llm"
+        assert onboard_web._stored_key("tavily") == ""
+    finally:
+        set_config_path(None)
+
+
+def test_the_onboarding_web_explanation_reaches_the_zh_catalog() -> None:
+    """The step-5 text is its own gettext key; a rewrite that leaves the zh entry
+    behind silently falls the whole screen back to English."""
+    assert onboard_web.WEB_STEPS_INTRO in zh_catalog.MESSAGES
